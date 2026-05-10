@@ -301,7 +301,45 @@ func TestTransformRequestStripsReasoningEffortWhenNoThinkingHistory(t *testing.T
 	}
 }
 
-func TestTransformRequestPreservesSystemCacheControl(t *testing.T) {
+func TestTransformRequestDoesNotSendThinkingFieldsForNonDeepSeek(t *testing.T) {
+	transformer := NewRequestTransformer()
+
+	// Some providers (e.g. GLM) reject these fields entirely or reject
+	// combinations like "thinking" + "reasoning_effort". Ensure we only send
+	// thinking-mode params for DeepSeek models.
+	req := &types.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 256,
+		Messages: []types.Message{
+			{Role: "user", Content: json.RawMessage(`"think about it"`)},
+			{
+				Role: "assistant",
+				Content: json.RawMessage(`[
+					{"type":"thinking","thinking":"Let me think..."},
+					{"type":"text","text":"Ok"}
+				]`),
+			},
+		},
+	}
+
+	openaiReq, err := transformer.TransformRequest(req, config.ModelConfig{
+		ModelID:         "glm-5.1",
+		ReasoningEffort: "high",
+		Thinking:        json.RawMessage(`{"type":"enabled"}`),
+	})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+
+	if openaiReq.ReasoningEffort != nil {
+		t.Fatalf("ReasoningEffort = %q, want nil (non-DeepSeek)", *openaiReq.ReasoningEffort)
+	}
+	if len(openaiReq.Thinking) != 0 {
+		t.Fatalf("Thinking = %s, want empty (non-DeepSeek)", string(openaiReq.Thinking))
+	}
+}
+
+func TestTransformRequestStripsSystemCacheControl(t *testing.T) {
 	transformer := NewRequestTransformer()
 
 	req := &types.MessageRequest{
@@ -331,11 +369,8 @@ func TestTransformRequestPreservesSystemCacheControl(t *testing.T) {
 	if got, want := systemMsg.Content, "You are helpful"; got != want {
 		t.Fatalf("Messages[0].Content = %q, want %q", got, want)
 	}
-	if systemMsg.CacheControl == nil {
-		t.Fatal("Messages[0].CacheControl = nil, want non-nil")
-	}
-	if got, want := systemMsg.CacheControl.Type, "ephemeral"; got != want {
-		t.Fatalf("Messages[0].CacheControl.Type = %q, want %q", got, want)
+	if systemMsg.CacheControl != nil {
+		t.Fatalf("Messages[0].CacheControl = %v, want nil (OpenAI providers reject messages[].cache_control)", systemMsg.CacheControl)
 	}
 }
 

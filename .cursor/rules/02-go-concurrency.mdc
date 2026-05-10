@@ -1,0 +1,24 @@
+---
+description: Go concurrency and goroutine lifecycle rules
+globs:
+  - "**/*.go"
+---
+
+## Goroutines must have a lifecycle
+
+- **Do not start goroutines “fire-and-forget”.** Every goroutine needs a clear shutdown condition.
+- Prefer **`context.Context` cancellation** to stop work; ensure goroutines exit on `ctx.Done()`.
+- Avoid goroutine leaks:
+  - Don’t block forever on sending to an unbuffered channel when no receiver is guaranteed.
+  - Use buffered channels for one-shot results, or select on `ctx.Done()`.
+
+## Coordinating concurrent work
+
+- Prefer `errgroup.WithContext` when running multiple concurrent tasks that should cancel together.
+- Capture loop variables correctly (`i, v := i, v`) before launching goroutines.
+
+## Channels and synchronization
+
+- Don’t communicate by sharing memory without synchronization; use channels or `sync` primitives.
+- Close channels only from the sending side and only when you own the channel.
+- Avoid mixing sync/async patterns in a way that obscures ownership (be explicit about who closes what).

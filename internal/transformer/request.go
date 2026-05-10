@@ -72,31 +72,35 @@ func (t *RequestTransformer) TransformRequest(
 		openaiReq.MaxTokens = &maxTokens
 	}
 
-	// DeepSeek-v4 models always operate in thinking mode. When conversation
-	// history contains thinking blocks (round-tripped as reasoning_content),
-	// we MUST send thinking mode params so DeepSeek validates reasoning_content
-	// on assistant messages. When history LACKS thinking blocks (Claude Code
-	// dropped them), we MUST explicitly disable thinking mode so DeepSeek
-	// doesn't require reasoning_content we can't provide.
+	// DeepSeek-v4 models operate in thinking mode and require careful handling:
+	// when history contains thinking blocks (round-tripped as reasoning_content),
+	// we must send thinking mode params so DeepSeek validates reasoning_content.
+	//
+	// IMPORTANT: Other OpenAI-compatible providers may reject these fields
+	// altogether, or reject combinations (e.g. GLM: "cannot specify both
+	// 'thinking' and 'reasoning_effort'"). So we only apply this logic for
+	// DeepSeek models.
 	hasThinkingInHistory := HasThinkingBlocks(anthropicReq.Messages)
-	if hasThinkingInHistory {
-		// Thinking mode required — use model config values or defaults.
-		if model.ReasoningEffort != "" {
-			openaiReq.ReasoningEffort = &model.ReasoningEffort
-		} else {
-			defaultEffort := "high"
-			openaiReq.ReasoningEffort = &defaultEffort
+	if isDeepSeekModel(model.ModelID) {
+		if hasThinkingInHistory {
+			// Thinking mode required — use model config values or defaults.
+			if model.ReasoningEffort != "" {
+				openaiReq.ReasoningEffort = &model.ReasoningEffort
+			} else {
+				defaultEffort := "high"
+				openaiReq.ReasoningEffort = &defaultEffort
+			}
+			if len(model.Thinking) > 0 {
+				openaiReq.Thinking = model.Thinking
+			} else {
+				openaiReq.Thinking = json.RawMessage(`{"type":"enabled"}`)
+			}
+		} else if len(model.Thinking) > 0 || model.ReasoningEffort != "" {
+			// Model config wants thinking mode but history has no thinking blocks.
+			// Explicitly disable to prevent DeepSeek from requiring reasoning_content
+			// on assistant messages that can't provide it.
+			openaiReq.Thinking = json.RawMessage(`{"type":"disabled"}`)
 		}
-		if len(model.Thinking) > 0 {
-			openaiReq.Thinking = model.Thinking
-		} else {
-			openaiReq.Thinking = json.RawMessage(`{"type":"enabled"}`)
-		}
-	} else if len(model.Thinking) > 0 || model.ReasoningEffort != "" {
-		// Model config wants thinking mode but history has no thinking blocks.
-		// Explicitly disable to prevent DeepSeek from requiring reasoning_content
-		// on assistant messages that can't provide it.
-		openaiReq.Thinking = json.RawMessage(`{"type":"disabled"}`)
 	}
 
 	// Transform tools if present
@@ -129,24 +133,17 @@ func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageReques
 
 	var result []types.ChatMessage
 
-	// Add system message if present, preserving cache_control if available
+	// Add system message if present.
+	//
+	// Note: Anthropic supports `cache_control` on content blocks, but many
+	// OpenAI-compatible providers reject unknown message fields (e.g.
+	// `messages[0].cache_control`). Since this transformer targets OpenAI Chat
+	// Completions, we do not forward cache-control directives into `messages`.
 	systemText := anthropicReq.SystemText()
 	if systemText != "" {
 		systemMsg := types.ChatMessage{
 			Role:    "system",
 			Content: systemText,
-		}
-		// Try to extract cache_control from system array blocks
-		if len(anthropicReq.System) > 0 {
-			var blocks []types.SystemContentBlock
-			if err := json.Unmarshal(anthropicReq.System, &blocks); err == nil {
-				for _, b := range blocks {
-					if b.Type == "text" && b.CacheControl != nil {
-						systemMsg.CacheControl = b.CacheControl
-						break
-					}
-				}
-			}
 		}
 		result = append(result, systemMsg)
 	}

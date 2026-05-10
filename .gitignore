@@ -4,3 +4,9 @@ bin/
 .env
 .tmp/
 oc-go-cc
+
+# Cursor / agent state (keep rules committed, ignore runtime state)
+.cursor/hooks/state/
+
+# SpecStory session artifacts
+.specstory/

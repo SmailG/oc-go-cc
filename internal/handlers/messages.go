@@ -4,6 +4,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -104,12 +105,13 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		requestID = h.requestIDGen.Generate()
 	}
 	w.Header().Set("X-Request-ID", requestID)
+	logger := h.logger.With("request_id", requestID)
 
 	// Rate limiting
 	clientIP := middleware.GetClientIP(r)
 	if !h.rateLimiter.Allow(clientIP) {
 		h.metrics.RecordRateLimited()
-		h.logger.Warn("rate limited", "client", clientIP, "request_id", requestID)
+		logger.Warn("rate limited", "client", clientIP)
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
@@ -124,7 +126,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	// Deduplicate - skip duplicate requests
 	if _, ok := h.requestDedup.TryAcquire(rawBody); !ok {
 		h.metrics.RecordDeduplicated()
-		h.logger.Info("duplicate request skipped", "request_id", requestID)
+		logger.Info("duplicate request skipped")
 		return
 	}
 
@@ -145,7 +147,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	isStreaming := anthropicReq.Stream != nil && *anthropicReq.Stream
 	h.metrics.RecordRequest(isStreaming)
 
-	h.logger.Info("received request",
+	logger.Info("received request",
 		"model", anthropicReq.Model,
 		"streaming", isStreaming,
 		"messages", len(anthropicReq.Messages),
@@ -175,7 +177,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	// Count tokens.
 	tokenCount, err := h.tokenCounter.CountMessages(systemText, tokenMessages)
 	if err != nil {
-		h.logger.Warn("failed to count tokens", "error", err)
+		logger.Warn("failed to count tokens", "error", err)
 		tokenCount = 0
 	}
 
@@ -193,7 +195,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	h.logger.Info("routing request",
+	logger.Info("routing request",
 		"scenario", routeResult.Scenario,
 		"model", routeResult.Primary.ModelID,
 		"tokens", tokenCount,
@@ -204,15 +206,16 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 
 	if isStreaming {
 		// Streaming: use ProxyStream for real-time SSE transformation
-		h.handleStreaming(w, r, &anthropicReq, modelChain, rawBody)
+		h.handleStreaming(logger, w, r, &anthropicReq, modelChain, rawBody)
 	} else {
 		// Non-streaming: execute with fallback and return full response
-		h.handleNonStreaming(w, r, &anthropicReq, modelChain, rawBody)
+		h.handleNonStreaming(logger, w, r, &anthropicReq, modelChain, rawBody)
 	}
 }
 
 // handleStreaming handles a streaming request with real-time SSE proxying.
 func (h *MessagesHandler) handleStreaming(
+	logger *slog.Logger,
 	w http.ResponseWriter,
 	r *http.Request,
 	anthropicReq *types.MessageRequest,
@@ -228,12 +231,12 @@ func (h *MessagesHandler) handleStreaming(
 
 	// Set SSE headers immediately so Claude Code knows the stream is alive.
 	// This prevents client-side timeouts before we even start sending data.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	if f, ok := w.(http.Flusher); ok {
+	rw.Header().Set("Content-Type", "text/event-stream")
+	rw.Header().Set("Cache-Control", "no-cache")
+	rw.Header().Set("Connection", "keep-alive")
+	rw.Header().Set("X-Accel-Buffering", "no")
+	rw.WriteHeader(http.StatusOK)
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 
@@ -249,8 +252,8 @@ func (h *MessagesHandler) handleStreaming(
 			select {
 			case <-ticker.C:
 				// Send SSE comment (ignored by client but keeps connection alive)
-				_, _ = fmt.Fprintf(w, ":keepalive\n\n")
-				if f, ok := w.(http.Flusher); ok {
+				_, _ = fmt.Fprintf(rw, ":keepalive\n\n")
+				if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 					f.Flush()
 				}
 			case <-heartbeatDone:
@@ -269,12 +272,12 @@ func (h *MessagesHandler) handleStreaming(
 		// Check if client already disconnected before trying this model
 		select {
 		case <-clientCtx.Done():
-			h.logger.Info("client disconnected, stopping streaming fallbacks")
+			logger.Info("client disconnected, stopping streaming fallbacks")
 			return
 		default:
 		}
 
-		h.logger.Info("attempting streaming model", "model", model.ModelID)
+		logger.Info("attempting streaming model", "model", model.ModelID)
 
 		// Create a fresh context with timeout for THIS attempt only.
 		// Don't use r.Context() directly - it gets canceled when Claude Code retries.
@@ -289,16 +292,16 @@ func (h *MessagesHandler) handleStreaming(
 				cancel()
 				// Check if this was a client disconnect
 				if clientCtx.Err() == context.Canceled {
-					h.logger.Info("client disconnected during anthropic stream")
+					logger.Info("client disconnected during anthropic stream")
 					return
 				}
-				h.logger.Warn("anthropic streaming failed", "model", model.ModelID, "error", err)
+				logger.Warn("anthropic streaming failed", "model", model.ModelID, "error", err)
 				continue
 			}
 			cancel()
 			latency := time.Since(streamStart)
 			h.metrics.RecordSuccess(model.ModelID, latency)
-			h.logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
+			logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
 			return
 		}
 
@@ -306,7 +309,7 @@ func (h *MessagesHandler) handleStreaming(
 		openaiReq, err := h.requestTransformer.TransformRequest(anthropicReq, model)
 		if err != nil {
 			cancel()
-			h.logger.Warn("request transform failed", "model", model.ModelID, "error", err)
+			logger.Warn("request transform failed", "model", model.ModelID, "error", err)
 			continue
 		}
 
@@ -316,10 +319,10 @@ func (h *MessagesHandler) handleStreaming(
 			cancel()
 			// Check if this was a client disconnect (context canceled)
 			if clientCtx.Err() == context.Canceled {
-				h.logger.Info("client disconnected during upstream request")
+				logger.Info("client disconnected during upstream request")
 				return
 			}
-			h.logger.Warn("streaming request failed", "model", model.ModelID, "error", err)
+			logger.Warn("streaming request failed", "model", model.ModelID, "error", err)
 			continue
 		}
 
@@ -328,15 +331,15 @@ func (h *MessagesHandler) handleStreaming(
 			_ = streamBody.Close()
 			cancel()
 			if err == transformer.ErrClientDisconnected {
-				h.logger.Info("client disconnected during stream")
+				logger.Info("client disconnected during stream")
 				return
 			}
 			// Check if this was a client disconnect
 			if clientCtx.Err() == context.Canceled {
-				h.logger.Info("client disconnected during stream (context canceled)")
+				logger.Info("client disconnected during stream (context canceled)")
 				return
 			}
-			h.logger.Warn("stream proxy failed", "model", model.ModelID, "error", err)
+			logger.Warn("stream proxy failed", "model", model.ModelID, "error", err)
 			continue
 		}
 
@@ -344,7 +347,7 @@ func (h *MessagesHandler) handleStreaming(
 		cancel()
 		latency := time.Since(streamStart)
 		h.metrics.RecordSuccess(model.ModelID, latency)
-		h.logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
+		logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
 		return
 	}
 
@@ -444,6 +447,7 @@ func (h *MessagesHandler) sendStreamError(w http.ResponseWriter, message string)
 
 // handleNonStreaming handles a non-streaming request with fallback.
 func (h *MessagesHandler) handleNonStreaming(
+	logger *slog.Logger,
 	w http.ResponseWriter,
 	r *http.Request,
 	anthropicReq *types.MessageRequest,
@@ -467,6 +471,12 @@ func (h *MessagesHandler) handleNonStreaming(
 	)
 
 	if err != nil {
+		// If the client canceled the request, don't report this as a model failure.
+		// This often happens when Claude Code retries/supersedes a request.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			logger.Info("request canceled", "error", err)
+			return
+		}
 		h.metrics.RecordFailure()
 		h.sendError(w, http.StatusBadGateway, "all models failed", err)
 		return
@@ -475,7 +485,7 @@ func (h *MessagesHandler) handleNonStreaming(
 	latency := time.Since(startTime)
 	h.metrics.RecordSuccess(result.ModelID, latency)
 
-	h.logger.Info("request completed",
+	logger.Info("request completed",
 		"model", result.ModelID,
 		"attempts", result.Attempted,
 		"latency", latency,

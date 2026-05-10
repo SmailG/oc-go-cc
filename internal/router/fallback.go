@@ -3,6 +3,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -32,6 +33,16 @@ type CircuitBreaker struct {
 	recoveryTimeout  time.Duration // how long to wait before half-open
 	halfOpenMaxCalls int           // max test calls in half-open state
 	halfOpenCalls    int
+}
+
+// ForceOpen immediately opens the circuit breaker.
+// Use this for non-retryable failures (e.g. quota exceeded) to avoid wasting attempts.
+func (cb *CircuitBreaker) ForceOpen() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.lastFailureTime = time.Now()
+	cb.state = CircuitOpen
 }
 
 // NewCircuitBreaker creates a circuit breaker with default thresholds.
@@ -174,7 +185,19 @@ func (h *FallbackHandler) ExecuteWithFallback(
 ) (*FallbackResult, []byte, error) {
 	totalModels := len(models)
 
-	for i, model := range models {
+	for i := 0; i < len(models); i++ {
+		model := models[i]
+		// If the request was canceled (client disconnected / caller aborted),
+		// do not attempt fallbacks and do not penalize circuits.
+		if err := ctx.Err(); err != nil {
+			return &FallbackResult{
+				ModelID:     model.ModelID,
+				Success:     false,
+				Attempted:   i,
+				TotalModels: totalModels,
+			}, nil, fmt.Errorf("request canceled: %w", err)
+		}
+
 		cb := h.getCircuitBreaker(model.ModelID)
 
 		// Skip models with open circuit breakers
@@ -208,6 +231,41 @@ func (h *FallbackHandler) ExecuteWithFallback(
 			}, body, nil
 		}
 
+		// If the provider reports an insufficient quota, open the circuit
+		// immediately and skip other models from the same family (e.g. qwen*).
+		if isInsufficientQuotaError(err) {
+			cb.ForceOpen()
+			h.logger.Warn("model quota exceeded, opening circuit",
+				"model", model.ModelID,
+				"error", err,
+			)
+
+			// Skip subsequent Qwen fallbacks in this chain; they are likely to
+			// fail for the same account/quota and just waste attempts.
+			if isQwenModel(model.ModelID) {
+				for i+1 < len(models) && isQwenModel(models[i+1].ModelID) {
+					next := models[i+1].ModelID
+					h.getCircuitBreaker(next).ForceOpen()
+					h.logger.Info("skipping qwen fallback due to quota",
+						"model", next,
+					)
+					i++
+				}
+			}
+			continue
+		}
+
+		// Don't treat request cancellation as a model failure; callers can
+		// decide how to surface a canceled request.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return &FallbackResult{
+				ModelID:     model.ModelID,
+				Success:     false,
+				Attempted:   i + 1,
+				TotalModels: totalModels,
+			}, nil, err
+		}
+
 		cb.RecordFailure()
 		h.logger.Warn("model failed, trying fallback",
 			"model", model.ModelID,
@@ -225,6 +283,22 @@ func (h *FallbackHandler) ExecuteWithFallback(
 	}, nil, fmt.Errorf("all models failed (%d attempts)", totalModels)
 }
 
+func isInsufficientQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Examples seen in provider errors:
+	// - `"type":"insufficient_quota"`
+	// - `"code":"insufficient_quota"`
+	// - "exceeded your current quota"
+	return strings.Contains(s, "insufficient_quota") || strings.Contains(s, "exceeded your current quota")
+}
+
+func isQwenModel(modelID string) bool {
+	return strings.HasPrefix(strings.ToLower(modelID), "qwen")
+}
+
 // GetFallbackChain returns the fallback chain for a given primary model.
 func GetFallbackChain(primary config.ModelConfig, fallbacks map[string][]config.ModelConfig) []config.ModelConfig {
 	chain := []config.ModelConfig{primary}
@@ -239,6 +313,11 @@ func GetFallbackChain(primary config.ModelConfig, fallbacks map[string][]config.
 // IsRetryableError determines if an error is worth retrying with a fallback.
 func IsRetryableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// Quota exhaustion is not retryable; it requires operational intervention.
+	if isInsufficientQuotaError(err) {
 		return false
 	}
 

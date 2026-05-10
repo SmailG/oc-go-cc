@@ -1,0 +1,43 @@
+---
+description: Go core coding standards and quality gates for oc-go-cc
+globs:
+  - "**/*.go"
+---
+
+You are working in a Go 1.21+ codebase. Follow these rules for **all** Go changes.
+
+## Quality gates (always run)
+
+- **Format**: `gofmt` (and `goimports` if available in this repo/tooling).
+- **Static analysis**: run `go vet ./...` before proceeding.
+- **Repo lint/test commands** (preferred):
+  - `make lint` (runs vet + tests)
+  - `make test` (runs tests with race detector)
+
+If you can’t use Makefile targets, use the underlying commands:
+
+- `go vet ./...`
+- `go test -race ./...`
+
+## Error handling (required)
+
+- **Never ignore errors** (avoid `_ =` / blank identifier for errors unless it is truly best-effort cleanup).
+- **Wrap errors with context** using `%w`: `fmt.Errorf("doing X: %w", err)`.
+- **Use `errors.Is` / `errors.As`** when checking wrapped errors.
+- **No `panic`** for normal control flow or expected failures.
+
+## Context (required)
+
+- For **any blocking / I/O / network** operation, accept `context.Context` as the first parameter and pass it down.
+- Use `http.NewRequestWithContext` and propagate ctx through client calls.
+- Prefer timeouts (`context.WithTimeout`) at boundaries (HTTP handlers, external calls).
+
+## API / type design
+
+- **Accept interfaces, return structs** (don’t return interfaces unless there is a strong reason).
+- Keep interfaces **small and consumer-owned** (defined where they’re used).
+- Design so the **zero value is useful** when reasonable.
+
+## Exported identifiers
+
+- **Document all exported** types, functions, methods, and packages with GoDoc comments.

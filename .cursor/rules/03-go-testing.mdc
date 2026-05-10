@@ -1,0 +1,28 @@
+---
+description: Go testing rules (table-driven, race detector, helpers)
+globs:
+  - "**/*_test.go"
+---
+
+## Default testing style
+
+- Use **table-driven tests** with `t.Run`.
+- Use **subtests** for scenario grouping.
+- Use `t.Helper()` for assertion and setup helpers.
+- Prefer testing **public behavior** rather than private implementation details.
+
+## Required verification for code changes
+
+- Run repo targets:
+  - `make test` (race detector)
+  - `make lint` (vet + tests)
+
+If Make targets aren’t available, run:
+
+- `go test -race ./...`
+
+## Reliability rules
+
+- Avoid `time.Sleep()` in tests; synchronize with channels/conditions.
+- Use `t.Cleanup()` to ensure resources are released.
+- Use `t.TempDir()` for filesystem-based tests.
