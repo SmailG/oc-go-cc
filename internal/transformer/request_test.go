@@ -76,22 +76,24 @@ func TestTransformRequestRoundTripReasoning(t *testing.T) {
 	}
 
 	// Find the assistant message.
-	var assistantMsg *types.ChatMessage
+	var assistant types.ChatMessage
+	var foundAssistant bool
 	for i := range openaiReq.Messages {
 		if openaiReq.Messages[i].Role == "assistant" {
-			assistantMsg = &openaiReq.Messages[i]
+			assistant = openaiReq.Messages[i]
+			foundAssistant = true
 			break
 		}
 	}
-	if assistantMsg == nil {
+	if !foundAssistant {
 		t.Fatal("assistant message not found in transformed request")
 	}
 
 	// Step 5: Verify reasoning_content is preserved.
-	if assistantMsg.ReasoningContent == nil {
+	if assistant.ReasoningContent == nil {
 		t.Fatal("ReasoningContent = nil, want non-nil after round-trip")
 	}
-	if got, want := *assistantMsg.ReasoningContent, deepSeekReasoning; got != want {
+	if got, want := *assistant.ReasoningContent, deepSeekReasoning; got != want {
 		t.Fatalf("ReasoningContent = %q, want %q", got, want)
 	}
 
@@ -350,12 +352,12 @@ func TestTransformRequestStripsReasoningEffortWhenNoThinkingHistory(t *testing.T
 	}
 }
 
-func TestTransformRequestDoesNotSendThinkingFieldsForNonDeepSeek(t *testing.T) {
+func TestTransformRequestAppliesThinkingWhenHistoryIncludesThinkingBlocksNonDeepSeek(t *testing.T) {
 	transformer := NewRequestTransformer()
 
-	// Some providers (e.g. GLM) reject these fields entirely or reject
-	// combinations like "thinking" + "reasoning_effort". Ensure we only send
-	// thinking-mode params for DeepSeek models.
+	// Matches upstream: when assistant history includes thinking blocks,
+	// thinking + reasoning_effort are applied; for non-DeepSeek models the
+	// condition `!isThinkingDisabled || !isDeepSeekModel` still sets reasoning_effort.
 	req := &types.MessageRequest{
 		Model:     "claude-test",
 		MaxTokens: 256,
@@ -380,11 +382,14 @@ func TestTransformRequestDoesNotSendThinkingFieldsForNonDeepSeek(t *testing.T) {
 		t.Fatalf("TransformRequest() error = %v", err)
 	}
 
-	if openaiReq.ReasoningEffort != nil {
-		t.Fatalf("ReasoningEffort = %q, want nil (non-DeepSeek)", *openaiReq.ReasoningEffort)
+	if openaiReq.ReasoningEffort == nil {
+		t.Fatal("ReasoningEffort = nil, want high")
 	}
-	if len(openaiReq.Thinking) != 0 {
-		t.Fatalf("Thinking = %s, want empty (non-DeepSeek)", string(openaiReq.Thinking))
+	if got, want := *openaiReq.ReasoningEffort, "high"; got != want {
+		t.Fatalf("ReasoningEffort = %q, want %q", got, want)
+	}
+	if got, want := string(openaiReq.Thinking), `{"type":"enabled"}`; got != want {
+		t.Fatalf("Thinking = %s, want %s", got, want)
 	}
 }
 
@@ -607,21 +612,23 @@ func TestTransformRequestDeepSeekPlaceholderWithThinkingHistory(t *testing.T) {
 	}
 
 	// Find the second assistant message (tool_call only, no thinking)
-	var toolCallAssistant *types.ChatMessage
+	var toolAsst types.ChatMessage
+	var foundToolAsst bool
 	for i := range openaiReq.Messages {
 		if openaiReq.Messages[i].Role == "assistant" && len(openaiReq.Messages[i].ToolCalls) > 0 {
-			toolCallAssistant = &openaiReq.Messages[i]
+			toolAsst = openaiReq.Messages[i]
+			foundToolAsst = true
 			break
 		}
 	}
-	if toolCallAssistant == nil {
+	if !foundToolAsst {
 		t.Fatal("no assistant message with tool_calls found")
 	}
-	if toolCallAssistant.ReasoningContent == nil {
+	if toolAsst.ReasoningContent == nil {
 		t.Fatal("ReasoningContent = nil, want non-nil placeholder for DeepSeek with thinking history")
 	}
-	if *toolCallAssistant.ReasoningContent != " " {
-		t.Fatalf("ReasoningContent = %q, want placeholder space", *toolCallAssistant.ReasoningContent)
+	if *toolAsst.ReasoningContent != " " {
+		t.Fatalf("ReasoningContent = %q, want placeholder space", *toolAsst.ReasoningContent)
 	}
 }
 

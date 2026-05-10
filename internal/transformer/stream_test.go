@@ -226,28 +226,30 @@ func TestProxyStream_UsageOnlyChunk(t *testing.T) {
 	}
 
 	events := parseSSEEvents(t, w.buf.String())
-	var usage *types.Usage
+	var u types.Usage
+	var foundUsage bool
 	for _, event := range events {
 		if event.Usage != nil {
-			usage = event.Usage
+			u = *event.Usage
+			foundUsage = true
 		}
 	}
-	if usage == nil {
+	if !foundUsage {
 		t.Fatalf("no usage event found in stream: %+v", events)
 	}
 	// Per Anthropic spec, input_tokens excludes cache reads AND cache
 	// creations. Upstream prompt_tokens=123 split as 100 hit + 23 miss
 	// means everything was accounted for by the cache → input_tokens = 0.
-	if got, want := usage.InputTokens, 0; got != want {
+	if got, want := u.InputTokens, 0; got != want {
 		t.Fatalf("InputTokens = %d, want %d", got, want)
 	}
-	if got, want := usage.OutputTokens, 45; got != want {
+	if got, want := u.OutputTokens, 45; got != want {
 		t.Fatalf("OutputTokens = %d, want %d", got, want)
 	}
-	if got, want := usage.CacheReadInputTokens, 100; got != want {
+	if got, want := u.CacheReadInputTokens, 100; got != want {
 		t.Fatalf("CacheReadInputTokens = %d, want %d", got, want)
 	}
-	if got, want := usage.CacheCreationInputTokens, 23; got != want {
+	if got, want := u.CacheCreationInputTokens, 23; got != want {
 		t.Fatalf("CacheCreationInputTokens = %d, want %d", got, want)
 	}
 }
@@ -272,23 +274,25 @@ func TestProxyStream_PartialCacheTokensStreaming(t *testing.T) {
 	}
 
 	events := parseSSEEvents(t, w.buf.String())
-	var usage *types.Usage
+	var u types.Usage
+	var foundUsage bool
 	for _, event := range events {
 		if event.Usage != nil {
-			usage = event.Usage
+			u = *event.Usage
+			foundUsage = true
 		}
 	}
-	if usage == nil {
+	if !foundUsage {
 		t.Fatalf("no usage event found in stream: %+v", events)
 	}
 	// 100 - 60 - 30 = 10 tokens are neither cached nor newly cached.
-	if got, want := usage.InputTokens, 10; got != want {
+	if got, want := u.InputTokens, 10; got != want {
 		t.Errorf("InputTokens = %d, want %d", got, want)
 	}
-	if got, want := usage.CacheReadInputTokens, 60; got != want {
+	if got, want := u.CacheReadInputTokens, 60; got != want {
 		t.Errorf("CacheReadInputTokens = %d, want %d", got, want)
 	}
-	if got, want := usage.CacheCreationInputTokens, 30; got != want {
+	if got, want := u.CacheCreationInputTokens, 30; got != want {
 		t.Errorf("CacheCreationInputTokens = %d, want %d", got, want)
 	}
 }
@@ -328,13 +332,15 @@ func TestProxyStream_NoDuplicateMessageDelta(t *testing.T) {
 	}
 
 	// Verify usage is somewhere in the stream
-	var totalUsage *types.Usage
+	var totalUsage types.Usage
+	var foundTotalUsage bool
 	for _, ev := range events {
 		if ev.Usage != nil {
-			totalUsage = ev.Usage
+			totalUsage = *ev.Usage
+			foundTotalUsage = true
 		}
 	}
-	if totalUsage == nil {
+	if !foundTotalUsage {
 		t.Fatalf("no usage found in stream: %+v", events)
 	}
 	if got, want := totalUsage.InputTokens, 100; got != want {
