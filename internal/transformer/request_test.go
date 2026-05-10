@@ -157,6 +157,55 @@ func TestTransformRequestPreservesThinkingAsReasoningContent(t *testing.T) {
 	}
 }
 
+func TestTransformRequestIncludesStreamUsageOptions(t *testing.T) {
+	transformer := NewRequestTransformer()
+	stream := true
+
+	req := &types.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 256,
+		Stream:    &stream,
+		Messages: []types.Message{
+			{Role: "user", Content: json.RawMessage(`"hello"`)},
+		},
+	}
+
+	openaiReq, err := transformer.TransformRequest(req, config.ModelConfig{ModelID: "deepseek-v4-pro"})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+
+	if openaiReq.StreamOptions == nil {
+		t.Fatal("StreamOptions = nil, want include_usage enabled")
+	}
+	if !openaiReq.StreamOptions.IncludeUsage {
+		t.Fatal("StreamOptions.IncludeUsage = false, want true")
+	}
+}
+
+func TestTransformRequestOmitsStreamUsageOptionsWhenStreamingDisabled(t *testing.T) {
+	transformer := NewRequestTransformer()
+	stream := false
+
+	req := &types.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 256,
+		Stream:    &stream,
+		Messages: []types.Message{
+			{Role: "user", Content: json.RawMessage(`"hello"`)},
+		},
+	}
+
+	openaiReq, err := transformer.TransformRequest(req, config.ModelConfig{ModelID: "deepseek-v4-pro"})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+
+	if openaiReq.StreamOptions != nil {
+		t.Fatalf("StreamOptions = %v, want nil when streaming is disabled", openaiReq.StreamOptions)
+	}
+}
+
 func TestTransformRequestIncludesEmptyReasoningContentForToolCalls(t *testing.T) {
 	transformer := NewRequestTransformer()
 
@@ -450,6 +499,43 @@ func TestTransformRequestPlacesToolResultsBeforeUserText(t *testing.T) {
 	}
 	if got, want := openaiReq.Messages[2].Content, "now continue"; got != want {
 		t.Fatalf("Messages[2].Content = %q, want %q", got, want)
+	}
+}
+
+func TestTransformRequestSkipsReasoningEffortWhenThinkingDisabled(t *testing.T) {
+	transformer := NewRequestTransformer()
+
+	// When thinking is explicitly disabled in model config, reasoning_effort
+	// must NOT be set — DeepSeek returns 400 if both are present.
+	req := &types.MessageRequest{
+		Model:     "claude-test",
+		MaxTokens: 256,
+		Messages: []types.Message{
+			{Role: "user", Content: json.RawMessage(`"think carefully"`)},
+			{
+				Role: "assistant",
+				Content: json.RawMessage(`[
+					{"type":"thinking","thinking":"Let me think..."},
+					{"type":"text","text":"The answer is 42"}
+				]`),
+			},
+		},
+	}
+
+	openaiReq, err := transformer.TransformRequest(req, config.ModelConfig{
+		ModelID:         "deepseek-v4-pro",
+		ReasoningEffort: "max",
+		Thinking:        json.RawMessage(`{"type":"disabled"}`),
+	})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+
+	if openaiReq.ReasoningEffort != nil {
+		t.Fatalf("ReasoningEffort = %v, want nil (stripped because thinking is disabled)", *openaiReq.ReasoningEffort)
+	}
+	if got, want := string(openaiReq.Thinking), `{"type":"disabled"}`; got != want {
+		t.Fatalf("Thinking = %s, want %s", got, want)
 	}
 }
 

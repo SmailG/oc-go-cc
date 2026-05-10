@@ -108,7 +108,7 @@ func (m *Message) ContentBlocks() []ContentBlock {
 //   - "image": Source is populated
 type ContentBlock struct {
 	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
+	Text      string          `json:"text"`
 	ID        string          `json:"id,omitempty"`          // For tool_use (the tool call ID)
 	ToolUseID string          `json:"tool_use_id,omitempty"` // For tool_result (references the tool_use ID)
 	Name      string          `json:"name,omitempty"`
@@ -116,7 +116,7 @@ type ContentBlock struct {
 	Output    json.RawMessage `json:"output,omitempty"`    // Deprecated: use Content
 	Content   json.RawMessage `json:"content,omitempty"`   // For tool_result inner content
 	IsError   *bool           `json:"is_error,omitempty"`  // For tool_result
-	Thinking  string          `json:"thinking,omitempty"`  // For thinking blocks
+	Thinking  string          `json:"thinking"`            // For thinking blocks
 	Signature string          `json:"signature,omitempty"` // For thinking blocks
 	Source    *ImageSource    `json:"source,omitempty"`    // For image blocks
 }
@@ -220,12 +220,13 @@ type Delta struct {
 
 // MessageEvent represents a Server-Sent Event from the streaming API.
 type MessageEvent struct {
-	Type    string           `json:"type"`
-	Message *MessageResponse `json:"message,omitempty"`
-	Index   *int             `json:"index,omitempty"`
-	Delta   *Delta           `json:"delta,omitempty"`
-	Usage   *Usage           `json:"usage,omitempty"`
-	Error   *APIError        `json:"error,omitempty"`
+	Type         string           `json:"type"`
+	Message      *MessageResponse `json:"message,omitempty"`
+	Index        *int             `json:"index,omitempty"`
+	ContentBlock *ContentBlock    `json:"content_block,omitempty"`
+	Delta        *Delta           `json:"delta,omitempty"`
+	Usage        *Usage           `json:"usage,omitempty"`
+	Error        *APIError        `json:"error,omitempty"`
 }
 
 // APIError represents an error from the Anthropic API.

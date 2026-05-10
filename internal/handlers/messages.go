@@ -24,7 +24,6 @@ import (
 
 // MessagesHandler handles /v1/messages requests.
 type MessagesHandler struct {
-	config              *config.Config
 	client              *client.OpenCodeClient
 	modelRouter         *router.ModelRouter
 	fallbackHandler     *router.FallbackHandler
@@ -68,7 +67,6 @@ func (w *responseWriter) Flush() {
 
 // NewMessagesHandler creates a new messages handler.
 func NewMessagesHandler(
-	cfg *config.Config,
 	openCodeClient *client.OpenCodeClient,
 	modelRouter *router.ModelRouter,
 	fallbackHandler *router.FallbackHandler,
@@ -76,7 +74,6 @@ func NewMessagesHandler(
 	metrics *metrics.Metrics,
 ) *MessagesHandler {
 	return &MessagesHandler{
-		config:              cfg,
 		client:              openCodeClient,
 		modelRouter:         modelRouter,
 		fallbackHandler:     fallbackHandler,
@@ -182,9 +179,9 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Route to appropriate model.
-	// For streaming, use faster models to minimize TTFT (time-to-first-token)
 	var routeResult router.RouteResult
-	if isStreaming {
+	if isStreaming && !h.modelRouter.IsStreamingScenarioRoutingEnabled() {
+		// Streaming: use faster models to minimize TTFT (time-to-first-token)
 		routeResult = h.modelRouter.RouteForStreaming(routerMessages, tokenCount)
 	} else {
 		var err error
@@ -231,14 +228,14 @@ func (h *MessagesHandler) handleStreaming(
 
 	// Set SSE headers immediately so Claude Code knows the stream is alive.
 	// This prevents client-side timeouts before we even start sending data.
+	// Use rw (not the bare ResponseWriter) so headers and flush stay consistent
+	// if middleware wraps the writer.
 	rw.Header().Set("Content-Type", "text/event-stream")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
 	rw.Header().Set("X-Accel-Buffering", "no")
 	rw.WriteHeader(http.StatusOK)
-	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	rw.Flush()
 
 	// Start heartbeat to keep connection alive while waiting for upstream.
 	// Claude Code times out after ~6 seconds of no data, so we send pings every 3 seconds
@@ -253,9 +250,7 @@ func (h *MessagesHandler) handleStreaming(
 			case <-ticker.C:
 				// Send SSE comment (ignored by client but keeps connection alive)
 				_, _ = fmt.Fprintf(rw, ":keepalive\n\n")
-				if f, ok := rw.ResponseWriter.(http.Flusher); ok {
-					f.Flush()
-				}
+				rw.Flush()
 			case <-heartbeatDone:
 				return
 			case <-clientCtx.Done():

@@ -233,13 +233,109 @@ func TestTransformResponseWithCacheTokens(t *testing.T) {
 		t.Fatalf("TransformResponse() error = %v", err)
 	}
 
-	if got, want := anthropicResp.Usage.InputTokens, 100; got != want {
+	// Per Anthropic spec, input_tokens excludes cache reads AND cache
+	// creations. Upstream prompt_tokens=100 split as 80 hit + 20 miss
+	// means everything was accounted for by the cache → input_tokens = 0.
+	if got, want := anthropicResp.Usage.InputTokens, 0; got != want {
 		t.Errorf("Usage.InputTokens = %d, want %d", got, want)
 	}
 	if got, want := anthropicResp.Usage.OutputTokens, 50; got != want {
 		t.Errorf("Usage.OutputTokens = %d, want %d", got, want)
 	}
 	if got, want := anthropicResp.Usage.CacheReadInputTokens, 80; got != want {
+		t.Errorf("Usage.CacheReadInputTokens = %d, want %d", got, want)
+	}
+	if got, want := anthropicResp.Usage.CacheCreationInputTokens, 20; got != want {
+		t.Errorf("Usage.CacheCreationInputTokens = %d, want %d", got, want)
+	}
+}
+
+// TestTransformResponseWithPartialCacheTokens covers the case where the
+// upstream's hit + miss don't fully account for prompt_tokens (e.g., a
+// portion of the prompt is below the prefix-cache minimum and reported as
+// neither cached nor newly cached). The leftover should map to input_tokens.
+func TestTransformResponseWithPartialCacheTokens(t *testing.T) {
+	transformer := NewResponseTransformer()
+
+	openaiResp := &types.ChatCompletionResponse{
+		ID:     "chatcmpl-789",
+		Object: "chat.completion",
+		Model:  "deepseek-v4-pro",
+		Choices: []types.Choice{
+			{
+				Index: 0,
+				Message: types.ChatMessage{
+					Role:    "assistant",
+					Content: "ok",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: types.UsageInfo{
+			PromptTokens:          100,
+			CompletionTokens:      5,
+			TotalTokens:           105,
+			PromptCacheHitTokens:  60,
+			PromptCacheMissTokens: 30,
+			// 100 - 60 - 30 = 10 tokens are neither cached nor newly cached.
+		},
+	}
+
+	anthropicResp, err := transformer.TransformResponse(openaiResp, "claude-3-sonnet")
+	if err != nil {
+		t.Fatalf("TransformResponse() error = %v", err)
+	}
+
+	if got, want := anthropicResp.Usage.InputTokens, 10; got != want {
+		t.Errorf("Usage.InputTokens = %d, want %d", got, want)
+	}
+	if got, want := anthropicResp.Usage.CacheReadInputTokens, 60; got != want {
+		t.Errorf("Usage.CacheReadInputTokens = %d, want %d", got, want)
+	}
+	if got, want := anthropicResp.Usage.CacheCreationInputTokens, 30; got != want {
+		t.Errorf("Usage.CacheCreationInputTokens = %d, want %d", got, want)
+	}
+}
+
+// TestTransformResponseCacheExceedsPromptTokens covers the defensive edge
+// case where upstream reports cache_hit + cache_miss > prompt_tokens.
+// The nonNegative guard must clamp input_tokens to 0 instead of going negative.
+func TestTransformResponseCacheExceedsPromptTokens(t *testing.T) {
+	transformer := NewResponseTransformer()
+
+	openaiResp := &types.ChatCompletionResponse{
+		ID:     "chatcmpl-overflow",
+		Object: "chat.completion",
+		Model:  "deepseek-v4-pro",
+		Choices: []types.Choice{
+			{
+				Index: 0,
+				Message: types.ChatMessage{
+					Role:    "assistant",
+					Content: "ok",
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: types.UsageInfo{
+			PromptTokens:          50,
+			CompletionTokens:      5,
+			TotalTokens:           55,
+			PromptCacheHitTokens:  40,
+			PromptCacheMissTokens: 20,
+			// 50 - 40 - 20 = -10, clamped to 0
+		},
+	}
+
+	anthropicResp, err := transformer.TransformResponse(openaiResp, "claude-3-sonnet")
+	if err != nil {
+		t.Fatalf("TransformResponse() error = %v", err)
+	}
+
+	if got, want := anthropicResp.Usage.InputTokens, 0; got != want {
+		t.Errorf("Usage.InputTokens = %d, want %d", got, want)
+	}
+	if got, want := anthropicResp.Usage.CacheReadInputTokens, 40; got != want {
 		t.Errorf("Usage.CacheReadInputTokens = %d, want %d", got, want)
 	}
 	if got, want := anthropicResp.Usage.CacheCreationInputTokens, 20; got != want {

@@ -19,6 +19,12 @@ type ChatCompletionRequest struct {
 	Tools           []ToolDef       `json:"tools,omitempty"`
 	ToolChoice      interface{}     `json:"tool_choice,omitempty"`
 	Stop            interface{}     `json:"stop,omitempty"`
+	StreamOptions   *StreamOptions  `json:"stream_options,omitempty"`
+}
+
+// StreamOptions controls streaming response metadata from OpenAI-compatible APIs.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // ChatMessage represents a single message in the conversation.
@@ -33,7 +39,10 @@ type ChatMessage struct {
 }
 
 // ToolCall represents a function call made by the model.
+// Index is only present in streaming deltas — it identifies which tool call
+// position this delta belongs to within the tool_calls array.
 type ToolCall struct {
+	Index    int          `json:"index,omitempty"`
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`

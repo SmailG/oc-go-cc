@@ -55,11 +55,19 @@ jobs:
           if [ -n "$EXACT_TAG" ]; then
             TAG="$EXACT_TAG"
           else
-            # Auto-increment patch version from the latest tag
+            # Auto-increment with rollover (0-9 per segment)
             LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
             BASE=${LATEST_TAG#v}
             IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
             PATCH=$((PATCH + 1))
+            if [ "$PATCH" -gt 9 ]; then
+              PATCH=0
+              MINOR=$((MINOR + 1))
+              if [ "$MINOR" -gt 9 ]; then
+                MINOR=0
+                MAJOR=$((MAJOR + 1))
+              fi
+            fi
             TAG="v${MAJOR}.${MINOR}.${PATCH}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -331,6 +339,96 @@ jobs:
           RUBY
 
           git add Formula/oc-go-cc.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update oc-go-cc to ${VERSION}" || echo "No changes to commit"
+          git push
+
+  # ── Stage 4: Update Scoop Bucket ──────────────────────────────────
+  scoop:
+    name: Update Scoop Bucket
+    needs: release
+    if: github.repository == 'samueltuyizere/oc-go-cc'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --dir release-assets \
+            --pattern "checksums.txt"
+
+      - name: Extract checksums for Scoop
+        id: checksums
+        run: |
+          cd release-assets
+          WINDOWS_AMD64=$(awk '/windows-amd64/ {print $1}' checksums.txt)
+          WINDOWS_ARM64=$(awk '/windows-arm64/ {print $1}' checksums.txt)
+
+          echo "windows_amd64=$WINDOWS_AMD64" >> "$GITHUB_OUTPUT"
+          echo "windows_arm64=$WINDOWS_ARM64" >> "$GITHUB_OUTPUT"
+
+      # SCOOP_PAT needed here — cross-repo operations
+      - name: Update scoop bucket
+        env:
+          PAT: ${{ secrets.SCOOP_PAT }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.tag }}
+          WINDOWS_AMD64: ${{ steps.checksums.outputs.windows_amd64 }}
+          WINDOWS_ARM64: ${{ steps.checksums.outputs.windows_arm64 }}
+        run: |
+          REPO="${{ github.repository }}"
+          OWNER="${REPO%%/*}"
+          BUCKET_REPO="${OWNER}/scoop-bucket"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          # Clone the bucket repo (created manually as a public repo)
+          git clone "https://x-access-token:${PAT}@github.com/${BUCKET_REPO}.git" bucket-repo
+          cd bucket-repo
+
+          mkdir -p bucket
+
+          cat > bucket/oc-go-cc.json << JSON
+          {
+              "version": "${VERSION}",
+              "description": "Proxy Claude Code requests to OpenCode Go API",
+              "homepage": "https://github.com/${REPO}",
+              "license": "AGPL-3.0-only",
+              "architecture": {
+                  "64bit": {
+                      "url": "${BASE_URL}/oc-go-cc_windows-amd64.exe",
+                      "hash": "${WINDOWS_AMD64}"
+                  },
+                  "arm64": {
+                      "url": "${BASE_URL}/oc-go-cc_windows-arm64.exe",
+                      "hash": "${WINDOWS_ARM64}"
+                  }
+              },
+              "bin": "oc-go-cc.exe",
+              "post_install": "Get-ChildItem \$dir\\\\oc-go-cc_windows-*.exe | Rename-Item -NewName oc-go-cc.exe",
+              "checkver": {
+                  "github": "https://github.com/${REPO}"
+              },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/${REPO}/releases/download/v\$version/oc-go-cc_windows-amd64.exe"
+                      },
+                      "arm64": {
+                          "url": "https://github.com/${REPO}/releases/download/v\$version/oc-go-cc_windows-arm64.exe"
+                      }
+                  }
+              }
+          }
+          JSON
+
+          git add bucket/oc-go-cc.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "Update oc-go-cc to ${VERSION}" || echo "No changes to commit"

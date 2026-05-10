@@ -92,8 +92,8 @@ func TestProxyStream_ReasoningContentFastPath(t *testing.T) {
 	if events[1].Type != "content_block_start" {
 		t.Errorf("event[1].Type = %q, want content_block_start", events[1].Type)
 	}
-	if got := events[1].Delta.Type; got != "thinking" {
-		t.Errorf("event[1].Delta.Type = %q, want thinking", got)
+	if events[1].ContentBlock == nil || events[1].ContentBlock.Type != "thinking" {
+		t.Errorf("event[1].ContentBlock = %+v, want thinking block", events[1].ContentBlock)
 	}
 	if events[2].Type != "content_block_delta" {
 		t.Errorf("event[2].Type = %q, want content_block_delta", events[2].Type)
@@ -161,14 +161,14 @@ func TestProxyStream_ReasoningThenText(t *testing.T) {
 	}
 
 	// Verify types
-	if got := events[1].Delta.Type; got != "thinking" {
-		t.Errorf("event[1].Delta.Type = %q, want thinking", got)
+	if events[1].ContentBlock == nil || events[1].ContentBlock.Type != "thinking" {
+		t.Errorf("event[1].ContentBlock = %+v, want thinking block", events[1].ContentBlock)
 	}
 	if got := events[2].Delta.Type; got != "thinking_delta" {
 		t.Errorf("event[2].Delta.Type = %q, want thinking_delta", got)
 	}
-	if got := events[4].Delta.Type; got != "text" {
-		t.Errorf("event[4].Delta.Type = %q, want text", got)
+	if events[4].ContentBlock == nil || events[4].ContentBlock.Type != "text" {
+		t.Errorf("event[4].ContentBlock = %+v, want text block", events[4].ContentBlock)
 	}
 	if got := events[5].Delta.Type; got != "text_delta" {
 		t.Errorf("event[5].Delta.Type = %q, want text_delta", got)
@@ -198,7 +198,7 @@ func TestProxyStream_TextOnlyStillWorks(t *testing.T) {
 		t.Fatalf("expected 7 events, got %d: %+v", len(events), events)
 	}
 
-	if events[1].Type != "content_block_start" || events[1].Delta.Type != "text" {
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "text" {
 		t.Errorf("event[1] = %+v, want content_block_start(text)", events[1])
 	}
 	if events[2].Type != "content_block_delta" || events[2].Delta.Type != "text_delta" {
@@ -206,6 +206,139 @@ func TestProxyStream_TextOnlyStillWorks(t *testing.T) {
 	}
 	if events[2].Delta.Text != "Hello" {
 		t.Errorf("event[2].Delta.Text = %q, want Hello", events[2].Delta.Text)
+	}
+}
+
+func TestProxyStream_UsageOnlyChunk(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":123,"completion_tokens":45,"total_tokens":168,"prompt_cache_hit_tokens":100,"prompt_cache_miss_tokens":23}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "deepseek-v4-pro", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+	var usage *types.Usage
+	for _, event := range events {
+		if event.Usage != nil {
+			usage = event.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatalf("no usage event found in stream: %+v", events)
+	}
+	// Per Anthropic spec, input_tokens excludes cache reads AND cache
+	// creations. Upstream prompt_tokens=123 split as 100 hit + 23 miss
+	// means everything was accounted for by the cache → input_tokens = 0.
+	if got, want := usage.InputTokens, 0; got != want {
+		t.Fatalf("InputTokens = %d, want %d", got, want)
+	}
+	if got, want := usage.OutputTokens, 45; got != want {
+		t.Fatalf("OutputTokens = %d, want %d", got, want)
+	}
+	if got, want := usage.CacheReadInputTokens, 100; got != want {
+		t.Fatalf("CacheReadInputTokens = %d, want %d", got, want)
+	}
+	if got, want := usage.CacheCreationInputTokens, 23; got != want {
+		t.Fatalf("CacheCreationInputTokens = %d, want %d", got, want)
+	}
+}
+
+// TestProxyStream_PartialCacheTokensStreaming covers the case where
+// hit + miss < prompt_tokens in a streaming context. The leftover tokens
+// should map to input_tokens.
+func TestProxyStream_PartialCacheTokensStreaming(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Partial cache"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":30}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "deepseek-v4-pro", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+	var usage *types.Usage
+	for _, event := range events {
+		if event.Usage != nil {
+			usage = event.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatalf("no usage event found in stream: %+v", events)
+	}
+	// 100 - 60 - 30 = 10 tokens are neither cached nor newly cached.
+	if got, want := usage.InputTokens, 10; got != want {
+		t.Errorf("InputTokens = %d, want %d", got, want)
+	}
+	if got, want := usage.CacheReadInputTokens, 60; got != want {
+		t.Errorf("CacheReadInputTokens = %d, want %d", got, want)
+	}
+	if got, want := usage.CacheCreationInputTokens, 30; got != want {
+		t.Errorf("CacheCreationInputTokens = %d, want %d", got, want)
+	}
+}
+
+// TestProxyStream_NoDuplicateMessageDelta verifies that when finish_reason and
+// usage arrive in separate chunks, only ONE message_delta with a stop_reason
+// is emitted. Usage may arrive in a separate message_delta (without stop_reason)
+// if the upstream sends them in separate chunks.
+func TestProxyStream_NoDuplicateMessageDelta(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "deepseek-v4-pro", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Count message_delta events with a stop_reason
+	var stopDeltas []types.MessageEvent
+	for _, ev := range events {
+		if ev.Type == "message_delta" && ev.Delta != nil && ev.Delta.StopReason != "" {
+			stopDeltas = append(stopDeltas, ev)
+		}
+	}
+
+	if len(stopDeltas) != 1 {
+		t.Fatalf("expected exactly 1 message_delta with stop_reason, got %d: %+v", len(stopDeltas), stopDeltas)
+	}
+
+	// Verify usage is somewhere in the stream
+	var totalUsage *types.Usage
+	for _, ev := range events {
+		if ev.Usage != nil {
+			totalUsage = ev.Usage
+		}
+	}
+	if totalUsage == nil {
+		t.Fatalf("no usage found in stream: %+v", events)
+	}
+	if got, want := totalUsage.InputTokens, 100; got != want {
+		t.Errorf("InputTokens = %d, want %d", got, want)
 	}
 }
 
@@ -233,7 +366,7 @@ func TestProxyStream_ReasoningJSONFallback(t *testing.T) {
 		t.Fatalf("expected 6 events, got %d: %+v", len(events), events)
 	}
 
-	if events[1].Type != "content_block_start" || events[1].Delta.Type != "thinking" {
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "thinking" {
 		t.Errorf("event[1] = %+v, want content_block_start(thinking)", events[1])
 	}
 	if events[2].Type != "content_block_delta" || events[2].Delta.Type != "thinking_delta" {
@@ -267,7 +400,7 @@ func TestProxyStream_EmptyReasoningContentSkipped(t *testing.T) {
 		t.Fatalf("expected 6 events, got %d: %+v", len(events), events)
 	}
 
-	if events[1].Type != "content_block_start" || events[1].Delta.Type != "text" {
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "text" {
 		t.Errorf("event[1] = %+v, want content_block_start(text)", events[1])
 	}
 	if *events[1].Index != 0 {
@@ -304,7 +437,7 @@ func TestProxyStream_ReasoningAndContentInSameChunk(t *testing.T) {
 	}
 
 	// Block 0: thinking
-	if events[1].Type != "content_block_start" || events[1].Delta.Type != "thinking" {
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "thinking" {
 		t.Errorf("event[1] = %+v, want content_block_start(thinking)", events[1])
 	}
 	if events[2].Type != "content_block_delta" || events[2].Delta.Type != "thinking_delta" {
@@ -318,7 +451,7 @@ func TestProxyStream_ReasoningAndContentInSameChunk(t *testing.T) {
 	}
 
 	// Block 1: text
-	if events[4].Type != "content_block_start" || events[4].Delta.Type != "text" {
+	if events[4].Type != "content_block_start" || events[4].ContentBlock == nil || events[4].ContentBlock.Type != "text" {
 		t.Errorf("event[4] = %+v, want content_block_start(text)", events[4])
 	}
 	if events[5].Type != "content_block_delta" || events[5].Delta.Type != "text_delta" {
@@ -372,7 +505,7 @@ func TestProxyStream_ReasoningBeforeContentFastPathRegression(t *testing.T) {
 	}
 
 	// Block 0: thinking (must NOT be lost)
-	if events[1].Type != "content_block_start" || events[1].Delta.Type != "thinking" {
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "thinking" {
 		t.Errorf("event[1] = %+v, want content_block_start(thinking)", events[1])
 	}
 	if events[2].Type != "content_block_delta" || events[2].Delta.Type != "thinking_delta" {
@@ -383,11 +516,271 @@ func TestProxyStream_ReasoningBeforeContentFastPathRegression(t *testing.T) {
 	}
 
 	// Block 1: text
-	if events[4].Type != "content_block_start" || events[4].Delta.Type != "text" {
+	if events[4].Type != "content_block_start" || events[4].ContentBlock == nil || events[4].ContentBlock.Type != "text" {
 		t.Errorf("event[4] = %+v, want content_block_start(text)", events[4])
 	}
 	if events[5].Delta.Text != "Hello" {
 		t.Errorf("event[5].Delta.Text = %q, want Hello", events[5].Delta.Text)
+	}
+}
+
+// TestProxyStream_ToolCallFinishReasonWithUsage verifies that when finish_reason
+// arrives (fast path) followed by a usage-only chunk, tool blocks are closed
+// exactly once — no duplicate content_block_stop from EOF cleanup.
+func TestProxyStream_ToolCallFinishReasonWithUsage(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_a","type":"function","function":{"name":"fn_a","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"toolu_b","type":"function","function":{"name":"fn_b","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"x\":1}"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"y\":2}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Count content_block_stop events — should be exactly 2 (one per tool)
+	var stopCount int
+	for _, ev := range events {
+		if ev.Type == "content_block_stop" {
+			stopCount++
+		}
+	}
+	if stopCount != 2 {
+		t.Fatalf("expected 2 content_block_stop events, got %d: %+v", stopCount, events)
+	}
+
+	// Verify usage is present
+	var hasUsage bool
+	for _, ev := range events {
+		if ev.Usage != nil {
+			hasUsage = true
+		}
+	}
+	if !hasUsage {
+		t.Error("expected usage in stream, found none")
+	}
+}
+
+// TestProxyStream_SingleToolCall verifies a single tool call streamed
+// incrementally produces exactly one content_block_start, argument deltas,
+// and a content_block_stop.
+func TestProxyStream_SingleToolCall(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_abc","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"loc"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ation\":\"NYC\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Expected: message_start, tool_start(idx=1), 2x input_json_delta (3rd arg arrives
+	// with finish_reason in same chunk, fast path returns before processing delta),
+	// tool_stop(idx=1), message_delta, message_stop = 7
+	if len(events) != 7 {
+		t.Fatalf("expected 7 events, got %d: %+v", len(events), events)
+	}
+
+	// Verify tool_use block start
+	if events[1].Type != "content_block_start" {
+		t.Errorf("event[1].Type = %q, want content_block_start", events[1].Type)
+	}
+	if events[1].ContentBlock == nil || events[1].ContentBlock.Type != "tool_use" {
+		t.Errorf("event[1].ContentBlock = %+v, want tool_use", events[1].ContentBlock)
+	}
+	if events[1].ContentBlock.ID != "toolu_abc" {
+		t.Errorf("event[1].ContentBlock.ID = %q, want toolu_abc", events[1].ContentBlock.ID)
+	}
+	if events[1].ContentBlock.Name != "get_weather" {
+		t.Errorf("event[1].ContentBlock.Name = %q, want get_weather", events[1].ContentBlock.Name)
+	}
+
+	// Verify argument deltas
+	if events[2].Delta == nil || events[2].Delta.Type != "input_json_delta" {
+		t.Errorf("event[2] = %+v, want input_json_delta", events[2])
+	}
+	if events[2].Delta.PartialJSON != `{"loc` {
+		t.Errorf("event[2].Delta.PartialJSON = %q, want %q", events[2].Delta.PartialJSON, `{"loc`)
+	}
+	if events[3].Delta == nil || events[3].Delta.Type != "input_json_delta" {
+		t.Errorf("event[3] = %+v, want input_json_delta", events[3])
+	}
+
+	// Verify tool block stop
+	if events[4].Type != "content_block_stop" {
+		t.Errorf("event[4].Type = %q, want content_block_stop", events[4].Type)
+	}
+
+	// Verify stop reason
+	if events[5].Type != "message_delta" {
+		t.Errorf("event[5].Type = %q, want message_delta", events[5].Type)
+	}
+	if events[5].Delta == nil || events[5].Delta.StopReason != "end_turn" {
+		t.Errorf("event[5].Delta.StopReason = %q, want end_turn", events[5].Delta.StopReason)
+	}
+	if events[6].Type != "message_stop" {
+		t.Errorf("event[6].Type = %q, want message_stop", events[6].Type)
+	}
+}
+
+// TestProxyStream_MultipleParallelToolCalls verifies that two concurrent tool
+// calls produce two content_block_start events, each with their own argument
+// deltas, and that content_block_stop events are emitted in ascending index
+// order (not random map iteration order).
+func TestProxyStream_MultipleParallelToolCalls(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	// Two tool calls: index 0 and index 1, interleaved as OpenAI sends them
+	body := sseLines(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"search","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"toolu_2","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"id"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"uery\":\"go\"}"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\":\"42\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Count content_block_start events (should be exactly 2)
+	var startEvents []types.MessageEvent
+	for _, ev := range events {
+		if ev.Type == "content_block_start" {
+			startEvents = append(startEvents, ev)
+		}
+	}
+	if len(startEvents) != 2 {
+		t.Fatalf("expected 2 content_block_start events, got %d", len(startEvents))
+	}
+
+	// Both should be tool_use blocks
+	for i, se := range startEvents {
+		if se.ContentBlock == nil || se.ContentBlock.Type != "tool_use" {
+			t.Errorf("start event[%d].ContentBlock = %+v, want tool_use", i, se.ContentBlock)
+		}
+	}
+	if startEvents[0].ContentBlock.Name != "search" {
+		t.Errorf("first tool name = %q, want search", startEvents[0].ContentBlock.Name)
+	}
+	if startEvents[1].ContentBlock.Name != "lookup" {
+		t.Errorf("second tool name = %q, want lookup", startEvents[1].ContentBlock.Name)
+	}
+
+	// Count content_block_stop events (should be exactly 2)
+	var stopIndices []int
+	for _, ev := range events {
+		if ev.Type == "content_block_stop" && ev.Index != nil {
+			stopIndices = append(stopIndices, *ev.Index)
+		}
+	}
+	if len(stopIndices) != 2 {
+		t.Fatalf("expected 2 content_block_stop events, got %d", len(stopIndices))
+	}
+	// Verify ascending order
+	if stopIndices[0] >= stopIndices[1] {
+		t.Errorf("stop indices not ascending: %v", stopIndices)
+	}
+}
+
+// TestProxyStream_ToolCallGhostChunk verifies that a ghost chunk (tool call
+// index with empty name) is ignored and does not produce a content_block_start.
+func TestProxyStream_ToolCallGhostChunk(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_a","type":"function","function":{"name":"real_func","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"x\":1}"}}]}}]}`,
+		// Ghost chunk: index 0 recycled but no name
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Should have exactly 1 content_block_start for the real tool call
+	var startEvents []types.MessageEvent
+	for _, ev := range events {
+		if ev.Type == "content_block_start" {
+			startEvents = append(startEvents, ev)
+		}
+	}
+	if len(startEvents) != 1 {
+		t.Fatalf("expected 1 content_block_start, got %d: %+v", len(startEvents), startEvents)
+	}
+}
+
+// TestProxyStream_MixedTextAndToolCall verifies a response that starts with
+// text content and then transitions to a tool call.
+func TestProxyStream_MixedTextAndToolCall(t *testing.T) {
+	handler := NewStreamHandler()
+	w := newMockResponseWriter()
+	body := sseLines(
+		`{"choices":[{"delta":{"content":"Let me check that for you."}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_x","type":"function","function":{"name":"get_data","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"id\":1}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_use"}]}`,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := handler.ProxyStream(w, body, "kimi-k2.6", ctx); err != nil {
+		t.Fatalf("ProxyStream error: %v", err)
+	}
+
+	events := parseSSEEvents(t, w.buf.String())
+
+	// Verify text block at index 0
+	if events[1].Type != "content_block_start" || events[1].ContentBlock == nil || events[1].ContentBlock.Type != "text" {
+		t.Errorf("event[1] = %+v, want content_block_start(text)", events[1])
+	}
+	if *events[1].Index != 0 {
+		t.Errorf("text start index = %d, want 0", *events[1].Index)
+	}
+
+	// Verify tool_use block at index 1
+	if events[3].Type != "content_block_start" || events[3].ContentBlock == nil || events[3].ContentBlock.Type != "tool_use" {
+		t.Errorf("event[3] = %+v, want content_block_start(tool_use)", events[3])
+	}
+	if *events[3].Index != 1 {
+		t.Errorf("tool start index = %d, want 1", *events[3].Index)
+	}
+	if events[3].ContentBlock.Name != "get_data" {
+		t.Errorf("tool name = %q, want get_data", events[3].ContentBlock.Name)
 	}
 }
 

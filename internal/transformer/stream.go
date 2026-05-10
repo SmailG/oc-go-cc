@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -71,6 +72,9 @@ func (h *StreamHandler) ProxyStream(
 	var lineBuf bytes.Buffer
 	contentStarted := false
 	reasoningStarted := false
+	stopSent := false
+	toolUseCount := 0
+	startedToolCalls := make(map[int]int) // maps OpenAI tool call index → Anthropic content block index
 
 	// Read in larger chunks for efficiency, then parse lines
 	readBuf := make([]byte, 4096)
@@ -94,7 +98,7 @@ func (h *StreamHandler) ProxyStream(
 					lineBuf.Reset()
 
 					// Process complete line
-					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, originalModel); err != nil {
+					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, originalModel); err != nil {
 						return err
 					}
 				} else {
@@ -107,7 +111,7 @@ func (h *StreamHandler) ProxyStream(
 			// Process any remaining data in buffer
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, originalModel); err != nil {
+				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, originalModel); err != nil {
 					return err
 				}
 			}
@@ -115,6 +119,32 @@ func (h *StreamHandler) ProxyStream(
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read stream: %w", err)
+		}
+	}
+
+	// Send stop events for any tool blocks not yet closed (e.g. upstream
+	// disconnected without sending a finish_reason chunk).
+	if len(startedToolCalls) > 0 {
+		type toolBlockEntry struct {
+			oi       int
+			blockIdx int
+		}
+		entries := make([]toolBlockEntry, 0, len(startedToolCalls))
+		for oi, blockIdx := range startedToolCalls {
+			entries = append(entries, toolBlockEntry{oi, blockIdx})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].blockIdx < entries[j].blockIdx
+		})
+		for _, e := range entries {
+			idx := e.blockIdx
+			stopEvent := types.MessageEvent{
+				Type:  "content_block_stop",
+				Index: &idx,
+			}
+			if err := writeSSEEvent(w, stopEvent); err != nil {
+				return ErrClientDisconnected
+			}
 		}
 	}
 
@@ -139,6 +169,9 @@ func (h *StreamHandler) processSSELine(
 	contentIndex *int,
 	contentStarted *bool,
 	reasoningStarted *bool,
+	stopSent *bool,
+	toolUseCount *int,
+	startedToolCalls map[int]int,
 	originalModel string,
 ) error {
 	line = strings.TrimSpace(line)
@@ -193,11 +226,9 @@ func (h *StreamHandler) processSSELine(
 						*contentStarted = true
 						// Send content_block_start
 						startEvent := types.MessageEvent{
-							Type:  "content_block_start",
-							Index: contentIndex,
-							Delta: &types.Delta{
-								Type: "text",
-							},
+							Type:         "content_block_start",
+							Index:        contentIndex,
+							ContentBlock: &types.ContentBlock{Type: "text", Text: ""},
 						}
 						if err := writeSSEEvent(w, startEvent); err != nil {
 							return ErrClientDisconnected
@@ -224,8 +255,11 @@ func (h *StreamHandler) processSSELine(
 		}
 	}
 
-	// Check for finish_reason - need to send stop events
-	if strings.Contains(data, `"finish_reason":`) && !strings.Contains(data, `"finish_reason":null`) {
+	// Check for finish_reason - need to send stop events. If the chunk also has
+	// usage, fall through to full JSON parsing so usage is preserved.
+	if strings.Contains(data, `"finish_reason":`) &&
+		!strings.Contains(data, `"finish_reason":null`) &&
+		!strings.Contains(data, `"usage":`) {
 		// Close any open content block (reasoning or text)
 		if *contentStarted || *reasoningStarted {
 			stopEvent := types.MessageEvent{
@@ -234,6 +268,35 @@ func (h *StreamHandler) processSSELine(
 			}
 			if err := writeSSEEvent(w, stopEvent); err != nil {
 				return ErrClientDisconnected
+			}
+		}
+
+		// Close any open tool_use blocks in ascending index order
+		if len(startedToolCalls) > 0 {
+			type toolBlockEntry struct {
+				oi       int
+				blockIdx int
+			}
+			entries := make([]toolBlockEntry, 0, len(startedToolCalls))
+			for oi, blockIdx := range startedToolCalls {
+				entries = append(entries, toolBlockEntry{oi, blockIdx})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].blockIdx < entries[j].blockIdx
+			})
+			for _, e := range entries {
+				idx := e.blockIdx
+				stopEvent := types.MessageEvent{
+					Type:  "content_block_stop",
+					Index: &idx,
+				}
+				if err := writeSSEEvent(w, stopEvent); err != nil {
+					return ErrClientDisconnected
+				}
+			}
+			// Clear so EOF cleanup won't emit duplicate stops
+			for oi := range startedToolCalls {
+				delete(startedToolCalls, oi)
 			}
 		}
 
@@ -247,6 +310,7 @@ func (h *StreamHandler) processSSELine(
 		if err := writeSSEEvent(w, msgDelta); err != nil {
 			return ErrClientDisconnected
 		}
+		*stopSent = true
 		flusher.Flush()
 		return nil
 	}
@@ -259,6 +323,25 @@ func (h *StreamHandler) processSSELine(
 	}
 
 	if len(chunk.Choices) == 0 {
+		if chunk.Usage != nil {
+			if *stopSent {
+				// Stop reason already sent — emit usage-only message_delta (no duplicate stop_reason).
+				event := types.MessageEvent{
+					Type:  "message_delta",
+					Delta: &types.Delta{},
+					Usage: usageInfoToAnthropic(chunk.Usage),
+				}
+				if err := writeSSEEvent(w, event); err != nil {
+					return ErrClientDisconnected
+				}
+				flusher.Flush()
+			} else {
+				if err := h.sendUsageDelta(w, flusher, chunk.Usage); err != nil {
+					return err
+				}
+				*stopSent = true
+			}
+		}
 		return nil
 	}
 
@@ -281,11 +364,9 @@ func (h *StreamHandler) processSSELine(
 			}
 			*reasoningStarted = true
 			startEvent := types.MessageEvent{
-				Type:  "content_block_start",
-				Index: contentIndex,
-				Delta: &types.Delta{
-					Type: "thinking",
-				},
+				Type:         "content_block_start",
+				Index:        contentIndex,
+				ContentBlock: &types.ContentBlock{Type: "thinking", Thinking: ""},
 			}
 			if err := writeSSEEvent(w, startEvent); err != nil {
 				return ErrClientDisconnected
@@ -324,11 +405,9 @@ func (h *StreamHandler) processSSELine(
 			}
 			*contentStarted = true
 			startEvent := types.MessageEvent{
-				Type:  "content_block_start",
-				Index: contentIndex,
-				Delta: &types.Delta{
-					Type: "text",
-				},
+				Type:         "content_block_start",
+				Index:        contentIndex,
+				ContentBlock: &types.ContentBlock{Type: "text", Text: ""},
 			}
 			if err := writeSSEEvent(w, startEvent); err != nil {
 				return ErrClientDisconnected
@@ -350,22 +429,49 @@ func (h *StreamHandler) processSSELine(
 		flusher.Flush()
 	}
 
-	// Handle tool call deltas
+	// Handle tool call deltas.
+	// OpenAI streams tool calls incrementally: the first chunk for a given
+	// tool call carries id + name (+ possibly empty arguments), subsequent
+	// chunks carry only incremental arguments.  We must create exactly one
+	// content_block_start per tool call, then stream deltas for it.
 	if len(choice.Delta.ToolCalls) > 0 {
 		for _, tc := range choice.Delta.ToolCalls {
-			*contentIndex++
+			oi := tc.Index // OpenAI tool_calls array index
 
-			startEvent := types.MessageEvent{
-				Type:  "content_block_start",
-				Index: contentIndex,
-				Delta: &types.Delta{
-					Type: "tool_use",
-				},
-			}
-			if err := writeSSEEvent(w, startEvent); err != nil {
-				return ErrClientDisconnected
+			blockIdx, exists := startedToolCalls[oi]
+			if !exists {
+				if tc.Function.Name == "" {
+					// Ghost chunk: this index was closed and recycled, but
+					// has no name/id. Ignore — the real tool call was
+					// already fully processed.
+					continue
+				}
+				// First time seeing this logical tool call — start a new block.
+				*contentIndex++
+				*toolUseCount++
+				blockIdx = *contentIndex
+				startedToolCalls[oi] = blockIdx
+
+				toolID := tc.ID
+				if toolID == "" {
+					toolID = fmt.Sprintf("toolu_%s", generateID())
+				}
+				startEvent := types.MessageEvent{
+					Type:  "content_block_start",
+					Index: &blockIdx,
+					ContentBlock: &types.ContentBlock{
+						Type:  "tool_use",
+						ID:    toolID,
+						Name:  tc.Function.Name,
+						Input: json.RawMessage(`{}`),
+					},
+				}
+				if err := writeSSEEvent(w, startEvent); err != nil {
+					return ErrClientDisconnected
+				}
 			}
 
+			// Send argument delta (if any) — whether new or continuation.
 			if tc.Function.Arguments != "" {
 				delta := types.Delta{
 					Type:        "input_json_delta",
@@ -373,7 +479,7 @@ func (h *StreamHandler) processSSELine(
 				}
 				event := types.MessageEvent{
 					Type:  "content_block_delta",
-					Index: contentIndex,
+					Index: &blockIdx,
 					Delta: &delta,
 				}
 				if err := writeSSEEvent(w, event); err != nil {
@@ -397,30 +503,84 @@ func (h *StreamHandler) processSSELine(
 			}
 		}
 
-		var usage *types.Usage
-		if chunk.Usage != nil {
-			usage = &types.Usage{
-				InputTokens:              chunk.Usage.PromptTokens,
-				OutputTokens:             chunk.Usage.CompletionTokens,
-				CacheCreationInputTokens: chunk.Usage.PromptCacheMissTokens,
-				CacheReadInputTokens:     chunk.Usage.PromptCacheHitTokens,
+		// Close any open tool_use blocks in ascending index order.
+		if len(startedToolCalls) > 0 {
+			type toolBlockEntry struct {
+				oi       int
+				blockIdx int
+			}
+			entries := make([]toolBlockEntry, 0, len(startedToolCalls))
+			for oi, blockIdx := range startedToolCalls {
+				entries = append(entries, toolBlockEntry{oi, blockIdx})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].blockIdx < entries[j].blockIdx
+			})
+			for _, e := range entries {
+				idx := e.blockIdx
+				stopEvent := types.MessageEvent{
+					Type:  "content_block_stop",
+					Index: &idx,
+				}
+				if err := writeSSEEvent(w, stopEvent); err != nil {
+					return ErrClientDisconnected
+				}
+			}
+			// Clear so EOF cleanup won't emit duplicate stops
+			for oi := range startedToolCalls {
+				delete(startedToolCalls, oi)
 			}
 		}
+		*toolUseCount = 0
 
 		msgDelta := types.MessageEvent{
 			Type: "message_delta",
 			Delta: &types.Delta{
 				StopReason: h.responseTransformer.mapFinishReason(choice.FinishReason),
 			},
-			Usage: usage,
+			Usage: usageInfoToAnthropic(chunk.Usage),
 		}
 		if err := writeSSEEvent(w, msgDelta); err != nil {
 			return ErrClientDisconnected
 		}
+		*stopSent = true
 		flusher.Flush()
 	}
 
 	return nil
+}
+
+func (h *StreamHandler) sendUsageDelta(w http.ResponseWriter, flusher http.Flusher, usage *types.UsageInfo) error {
+	event := types.MessageEvent{
+		Type: "message_delta",
+		Delta: &types.Delta{
+			StopReason: "end_turn",
+		},
+		Usage: usageInfoToAnthropic(usage),
+	}
+	if err := writeSSEEvent(w, event); err != nil {
+		return ErrClientDisconnected
+	}
+	flusher.Flush()
+	return nil
+}
+
+func usageInfoToAnthropic(usage *types.UsageInfo) *types.Usage {
+	if usage == nil {
+		return nil
+	}
+	return &types.Usage{
+		// Per Anthropic Messages API spec, `input_tokens` is the count of
+		// regular input tokens — i.e. tokens that were neither read from the
+		// cache nor written to the cache this turn. OpenAI's `prompt_tokens`
+		// is the *total* prompt size. We must subtract the cache parts here
+		// for the same reason TransformResponse does — see the longer comment
+		// in response.go.
+		InputTokens:              nonNegative(usage.PromptTokens - usage.PromptCacheHitTokens - usage.PromptCacheMissTokens),
+		OutputTokens:             usage.CompletionTokens,
+		CacheCreationInputTokens: usage.PromptCacheMissTokens,
+		CacheReadInputTokens:     usage.PromptCacheHitTokens,
+	}
 }
 
 // writeSSEEvent writes a single SSE event to the HTTP response writer.
