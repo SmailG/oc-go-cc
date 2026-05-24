@@ -179,13 +179,17 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Route to appropriate model.
+	// If the request specifies a model override, use it directly.
+	// Otherwise, use scenario-based routing.
+	requestedModel := anthropicReq.Model
+
 	var routeResult router.RouteResult
 	if isStreaming && !h.modelRouter.IsStreamingScenarioRoutingEnabled() {
 		// Streaming: use faster models to minimize TTFT (time-to-first-token)
-		routeResult = h.modelRouter.RouteForStreaming(routerMessages, tokenCount)
+		routeResult = h.modelRouter.RouteForStreaming(routerMessages, tokenCount, requestedModel)
 	} else {
 		var err error
-		routeResult, err = h.modelRouter.Route(routerMessages, tokenCount)
+		routeResult, err = h.modelRouter.Route(routerMessages, tokenCount, requestedModel)
 		if err != nil {
 			h.sendError(w, http.StatusInternalServerError, "routing failed", err)
 			return

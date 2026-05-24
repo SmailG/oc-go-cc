@@ -10,6 +10,7 @@ type Config struct {
 	Port                           int                      `json:"port"`
 	HotReload                      bool                     `json:"hot_reload"`
 	EnableStreamingScenarioRouting bool                     `json:"enable_streaming_scenario_routing"`
+	RespectRequestedModel          bool                     `json:"respect_requested_model"`
 	Models                         map[string]ModelConfig   `json:"models"`
 	Fallbacks                      map[string][]ModelConfig `json:"fallbacks"`
 	OpenCodeGo                     OpenCodeGoConfig         `json:"opencode_go"`
