@@ -11,20 +11,23 @@
       "provider": "opencode-go",
       "model_id": "qwen3.5-plus",
       "temperature": 0.5,
-      "max_tokens": 2048
+      "max_tokens": 2048,
+      "vision": true
     },
     "default": {
       "provider": "opencode-go",
       "model_id": "kimi-k2.6",
       "temperature": 0.7,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "vision": true
     },
     "long_context": {
       "provider": "opencode-go",
       "model_id": "minimax-m2.5",
       "temperature": 0.7,
       "max_tokens": 16384,
-      "context_threshold": 80000
+      "context_threshold": 80000,
+      "vision": true
     },
     "deepseek-v4-pro": {
       "provider": "opencode-go",
@@ -50,19 +53,22 @@
       "provider": "opencode-go",
       "model_id": "glm-5",
       "temperature": 0.7,
-      "max_tokens": 8192
+      "max_tokens": 8192,
+      "vision": true
     },
     "complex": {
       "provider": "opencode-go",
       "model_id": "glm-5.1",
       "temperature": 0.7,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "vision": true
     },
     "fast": {
       "provider": "opencode-go",
       "model_id": "qwen3.6-plus",
       "temperature": 0.7,
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "vision": true
     }
   },
 
@@ -93,9 +99,100 @@
     ]
   },
 
+  "model_overrides": {
+    "claude-sonnet-4.5": {
+      "provider": "opencode-zen",
+      "model_id": "claude-sonnet-4.5",
+      "temperature": 0.7,
+      "max_tokens": 8192,
+      "vision": true
+    },
+    "claude-sonnet-4.6": {
+      "provider": "opencode-zen",
+      "model_id": "claude-sonnet-4.6",
+      "temperature": 0.7,
+      "max_tokens": 8192,
+      "vision": true
+    },
+    "claude-opus-4.7": {
+      "provider": "opencode-zen",
+      "model_id": "claude-opus-4.7",
+      "temperature": 0.7,
+      "max_tokens": 8192,
+      "vision": true
+    },
+    "claude-haiku-4.5": {
+      "provider": "opencode-zen",
+      "model_id": "claude-haiku-4.5",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "vision": true
+    },
+    "deepseek-v4-flash-free": {
+      "provider": "opencode-zen",
+      "model_id": "deepseek-v4-flash-free",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "grok-build-0.1": {
+      "provider": "opencode-zen",
+      "model_id": "grok-build-0.1",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "big-pickle": {
+      "provider": "opencode-zen",
+      "model_id": "big-pickle",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "mimo-v2.5-free": {
+      "provider": "opencode-zen",
+      "model_id": "mimo-v2.5-free",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "nemotron-3-ultra-free": {
+      "provider": "opencode-zen",
+      "model_id": "nemotron-3-ultra-free",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "north-mini-code-free": {
+      "provider": "opencode-zen",
+      "model_id": "north-mini-code-free",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "minimax-m3": {
+      "provider": "opencode-go",
+      "model_id": "minimax-m3",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "deepseek-v4-pro": {
+      "provider": "opencode-zen",
+      "model_id": "deepseek-v4-pro",
+      "temperature": 0.7,
+      "max_tokens": 8192,
+      "reasoning_effort": "max",
+      "thinking": {
+        "type": "enabled"
+      }
+    }
+  },
+
   "opencode_go": {
     "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
     "anthropic_base_url": "https://opencode.ai/zen/go/v1/messages",
+    "timeout_ms": 300000
+  },
+
+  "opencode_zen": {
+    "base_url": "https://opencode.ai/zen/v1/chat/completions",
+    "anthropic_base_url": "https://opencode.ai/zen/v1/messages",
+    "responses_base_url": "https://opencode.ai/zen/v1/responses",
+    "gemini_base_url": "https://opencode.ai/zen/v1/models",
     "timeout_ms": 300000
   },
 
