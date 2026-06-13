@@ -58,7 +58,7 @@ func (r *ModelRouter) resolveRequestedModel(cfg *config.Config, requestedModel s
 
 // Route determines which model to use for a request.
 // If respect_requested_model is enabled and requestedModel is provided, it overrides scenario-based routing.
-func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requestedModel string) (RouteResult, error) {
+func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, toolCount int, requestedModel string) (RouteResult, error) {
 	cfg := r.atomic.Get()
 
 	if result, ok := r.resolveRequestedModel(cfg, requestedModel); ok {
@@ -66,7 +66,7 @@ func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requested
 	}
 
 	// Otherwise, use scenario-based routing
-	result := DetectScenario(messages, tokenCount, cfg)
+	result := DetectScenario(messages, tokenCount, toolCount, cfg)
 
 	// Get primary model for scenario
 	primary, ok := cfg.Models[string(result.Scenario)]
@@ -96,6 +96,11 @@ func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requested
 // scenario-based routing instead of always routing to the fast model.
 func (r *ModelRouter) IsStreamingScenarioRoutingEnabled() bool {
 	return r.atomic.Get().EnableStreamingScenarioRouting
+}
+
+// IsPreferCapabilityEnabled returns whether routing favors capable models over TTFT.
+func (r *ModelRouter) IsPreferCapabilityEnabled() bool {
+	return r.atomic.Get().PreferCapability
 }
 
 // RouteWithOverride checks if the requested model matches a model_overrides entry.
@@ -138,7 +143,7 @@ func (rr *RouteResult) GetModelChain() []config.ModelConfig {
 // RouteForStreaming determines which model to use for streaming requests.
 // Prioritizes fast TTFT (time-to-first-token) over capability.
 // If respect_requested_model is enabled and requestedModel is provided, it overrides scenario-based routing.
-func (r *ModelRouter) RouteForStreaming(messages []MessageContent, tokenCount int, requestedModel string) RouteResult {
+func (r *ModelRouter) RouteForStreaming(messages []MessageContent, tokenCount int, toolCount int, requestedModel string) RouteResult {
 	cfg := r.atomic.Get()
 
 	if result, ok := r.resolveRequestedModel(cfg, requestedModel); ok {
@@ -146,7 +151,7 @@ func (r *ModelRouter) RouteForStreaming(messages []MessageContent, tokenCount in
 	}
 
 	// Otherwise, use scenario-based routing for streaming
-	result := RouteForStreaming(messages, tokenCount, cfg)
+	result := RouteForStreaming(messages, tokenCount, toolCount, cfg)
 
 	// Get primary model for scenario
 	primary, ok := cfg.Models[string(result.Scenario)]

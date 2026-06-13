@@ -5,19 +5,22 @@ import "encoding/json"
 
 // Config holds the complete application configuration.
 type Config struct {
-	APIKey                         string                   `json:"api_key"`
-	APIKeys                        []string                 `json:"api_keys"`
-	Host                           string                   `json:"host"`
-	Port                           int                      `json:"port"`
-	HotReload                      bool                     `json:"hot_reload"`
-	EnableStreamingScenarioRouting bool                     `json:"enable_streaming_scenario_routing"`
-	RespectRequestedModel          bool                     `json:"respect_requested_model"`
-	Models                         map[string]ModelConfig   `json:"models"`
-	Fallbacks                      map[string][]ModelConfig `json:"fallbacks"`
-	ModelOverrides                 map[string]ModelConfig   `json:"model_overrides"`
-	OpenCodeGo                     OpenCodeGoConfig         `json:"opencode_go"`
-	OpenCodeZen                    OpenCodeZenConfig        `json:"opencode_zen"`
-	Logging                        LoggingConfig            `json:"logging"`
+	APIKey                         string   `json:"api_key"`
+	APIKeys                        []string `json:"api_keys"`
+	Host                           string   `json:"host"`
+	Port                           int      `json:"port"`
+	HotReload                      bool     `json:"hot_reload"`
+	EnableStreamingScenarioRouting bool     `json:"enable_streaming_scenario_routing"`
+	// PreferCapability selects capable models and full scenario routing for streaming
+	// (no downgrade to qwen "fast"). Use when quality should be closer to native Claude Code.
+	PreferCapability      bool                     `json:"prefer_capability"`
+	RespectRequestedModel bool                     `json:"respect_requested_model"`
+	Models                map[string]ModelConfig   `json:"models"`
+	Fallbacks             map[string][]ModelConfig `json:"fallbacks"`
+	ModelOverrides        map[string]ModelConfig   `json:"model_overrides"`
+	OpenCodeGo            OpenCodeGoConfig         `json:"opencode_go"`
+	OpenCodeZen           OpenCodeZenConfig        `json:"opencode_zen"`
+	Logging               LoggingConfig            `json:"logging"`
 }
 
 // ModelConfig defines routing rules for a specific model.

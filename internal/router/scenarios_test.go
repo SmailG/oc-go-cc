@@ -76,7 +76,7 @@ func TestDetectScenario_ComplexFromUser(t *testing.T) {
 	messages := []MessageContent{
 		{Role: "user", Content: "Architect a new microservice for user authentication"},
 	}
-	result := DetectScenario(messages, 100, mockConfig())
+	result := DetectScenario(messages, 100, 0, mockConfig())
 	if result.Scenario != ScenarioComplex {
 		t.Errorf("Expected ScenarioComplex, got %s", result.Scenario)
 	}
@@ -86,7 +86,7 @@ func TestDetectScenario_ThinkFromUser(t *testing.T) {
 	messages := []MessageContent{
 		{Role: "user", Content: "Analyze the tradeoffs of this design"},
 	}
-	result := DetectScenario(messages, 100, mockConfig())
+	result := DetectScenario(messages, 100, 0, mockConfig())
 	if result.Scenario != ScenarioThink {
 		t.Errorf("Expected ScenarioThink, got %s", result.Scenario)
 	}
@@ -96,7 +96,7 @@ func TestDetectScenario_DefaultFromSimpleUserMessage(t *testing.T) {
 	messages := []MessageContent{
 		{Role: "user", Content: "Hello, how are you?"},
 	}
-	result := DetectScenario(messages, 100, mockConfig())
+	result := DetectScenario(messages, 100, 0, mockConfig())
 	if result.Scenario != ScenarioDefault {
 		t.Errorf("Expected ScenarioDefault, got %s", result.Scenario)
 	}
@@ -107,7 +107,7 @@ func TestDetectScenario_LongContextTakesPriority(t *testing.T) {
 		{Role: "user", Content: "Refactor this code"},
 	}
 	// Token count > 60000 should trigger long_context regardless of content
-	result := DetectScenario(messages, 70000, mockConfig())
+	result := DetectScenario(messages, 70000, 0, mockConfig())
 	if result.Scenario != ScenarioLongContext {
 		t.Errorf("Expected ScenarioLongContext, got %s", result.Scenario)
 	}
@@ -127,13 +127,13 @@ func TestRouteForStreaming_RespectsConfiguredThreshold(t *testing.T) {
 	}
 
 	// Below threshold should NOT trigger long_context
-	result := RouteForStreaming(messages, 40955, cfg)
+	result := RouteForStreaming(messages, 40955, 0, cfg)
 	if result.Scenario == ScenarioLongContext {
 		t.Errorf("Expected NOT ScenarioLongContext for 40955 tokens with threshold 256000, got %s", result.Scenario)
 	}
 
 	// Above threshold should trigger long_context
-	result = RouteForStreaming(messages, 300000, cfg)
+	result = RouteForStreaming(messages, 300000, 0, cfg)
 	if result.Scenario != ScenarioLongContext {
 		t.Errorf("Expected ScenarioLongContext for 300000 tokens with threshold 256000, got %s", result.Scenario)
 	}
@@ -151,14 +151,53 @@ func TestRouteForStreaming_UsesDefaultThresholdWhenNotConfigured(t *testing.T) {
 	}
 
 	// Default threshold is 100000
-	result := RouteForStreaming(messages, 90000, cfg)
+	result := RouteForStreaming(messages, 90000, 0, cfg)
 	if result.Scenario == ScenarioLongContext {
 		t.Errorf("Expected NOT ScenarioLongContext for 90000 tokens with default threshold, got %s", result.Scenario)
 	}
 
-	result = RouteForStreaming(messages, 110000, cfg)
+	result = RouteForStreaming(messages, 110000, 0, cfg)
 	if result.Scenario != ScenarioLongContext {
 		t.Errorf("Expected ScenarioLongContext for 110000 tokens with default threshold, got %s", result.Scenario)
+	}
+}
+
+func TestDetectScenario_ToolHeavy(t *testing.T) {
+	messages := []MessageContent{{Role: "user", Content: "hello"}}
+	result := DetectScenario(messages, 1000, 64, mockConfig())
+	if result.Scenario != ScenarioComplex {
+		t.Fatalf("Expected ScenarioComplex for 64 tools, got %s (%s)", result.Scenario, result.Reason)
+	}
+}
+
+func TestRouteForStreaming_PreferCapabilitySkipsFastDowngrade(t *testing.T) {
+	messages := []MessageContent{{Role: "user", Content: "hello"}}
+	cfg := mockConfig()
+	cfg.PreferCapability = true
+	result := RouteForStreaming(messages, 1000, 0, cfg)
+	if result.Scenario == ScenarioFast {
+		t.Fatalf("expected scenario routing with prefer_capability, got fast: %s", result.Reason)
+	}
+	if result.Scenario != ScenarioDefault {
+		t.Fatalf("expected default for simple streaming+capability, got %s", result.Scenario)
+	}
+}
+
+func TestDetectScenario_CapabilityModeAgentTools(t *testing.T) {
+	messages := []MessageContent{{Role: "user", Content: "hello"}}
+	cfg := mockConfig()
+	cfg.PreferCapability = true
+	result := DetectScenario(messages, 5000, 20, cfg)
+	if result.Scenario != ScenarioComplex {
+		t.Fatalf("expected complex for 20 tools in capability mode, got %s (%s)", result.Scenario, result.Reason)
+	}
+}
+
+func TestRouteForStreaming_ToolHeavyUsesScenarioRouting(t *testing.T) {
+	messages := []MessageContent{{Role: "user", Content: "hello"}}
+	result := RouteForStreaming(messages, 30000, 64, mockConfig())
+	if result.Scenario != ScenarioComplex {
+		t.Fatalf("Expected ScenarioComplex for tool-heavy streaming, got %s (%s)", result.Scenario, result.Reason)
 	}
 }
 
@@ -168,12 +207,12 @@ func TestRouteForStreaming_NilConfig(t *testing.T) {
 	}
 
 	// Default threshold is 100000; nil config should not panic
-	result := RouteForStreaming(messages, 90000, nil)
+	result := RouteForStreaming(messages, 90000, 0, nil)
 	if result.Scenario == ScenarioLongContext {
 		t.Errorf("Expected NOT ScenarioLongContext for 90000 tokens with nil config, got %s", result.Scenario)
 	}
 
-	result = RouteForStreaming(messages, 110000, nil)
+	result = RouteForStreaming(messages, 110000, 0, nil)
 	if result.Scenario != ScenarioLongContext {
 		t.Errorf("Expected ScenarioLongContext for 110000 tokens with nil config, got %s", result.Scenario)
 	}

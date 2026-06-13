@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,12 +41,19 @@ type MessagesHandler struct {
 }
 
 // responseWriter wraps http.ResponseWriter to track if headers were written.
+// A mutex serializes writes: the heartbeat goroutine and ProxyStream must not
+// interleave SSE frames on the same connection (that corrupts the stream and
+// causes Claude Code to disconnect).
 type responseWriter struct {
 	http.ResponseWriter
-	wroteHeader bool
+	wroteHeader        bool
+	mu                 sync.Mutex
+	textKeepaliveIndex int // >=0 while placeholder text block is open (pre-upstream); -1 otherwise
 }
 
 func (w *responseWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.wroteHeader {
 		w.wroteHeader = true
 		w.ResponseWriter.WriteHeader(code)
@@ -53,14 +61,46 @@ func (w *responseWriter) WriteHeader(code int) {
 }
 
 func (w *responseWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.wroteHeader {
-		w.WriteHeader(http.StatusOK)
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(b)
 }
 
+func (w *responseWriter) keepaliveIndex() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.textKeepaliveIndex
+}
+
+func (w *responseWriter) setKeepaliveIndex(idx int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.textKeepaliveIndex = idx
+}
+
+// clearTextKeepaliveOnRead stops TTFT text keepalives once upstream sends data.
+type clearTextKeepaliveOnRead struct {
+	io.ReadCloser
+	clear func()
+	once  sync.Once
+}
+
+func (c *clearTextKeepaliveOnRead) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	if n > 0 {
+		c.once.Do(c.clear)
+	}
+	return n, err
+}
+
 // Flush implements http.Flusher for SSE streaming support.
 func (w *responseWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -180,7 +220,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Route to appropriate model and build fallback chain.
-	modelChain, routeResult, err := h.buildModelChain(anthropicReq.Model, routerMessages, tokenCount, isStreaming)
+	modelChain, routeResult, err := h.buildModelChain(anthropicReq.Model, routerMessages, tokenCount, len(anthropicReq.Tools), isStreaming)
 	if err != nil {
 		h.sendError(w, http.StatusInternalServerError, "routing failed", err)
 		return
@@ -191,6 +231,9 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		"model", routeResult.Primary.ModelID,
 		"provider", routeResult.Primary.Provider,
 		"tokens", tokenCount,
+		"tools", len(anthropicReq.Tools),
+		"prefer_capability", h.modelRouter.IsPreferCapabilityEnabled(),
+		"streaming_scenario_routing", h.modelRouter.IsStreamingScenarioRoutingEnabled(),
 	)
 
 	if isStreaming {
@@ -214,11 +257,12 @@ func (h *MessagesHandler) buildModelChain(
 	requestedModel string,
 	routerMessages []router.MessageContent,
 	tokenCount int,
+	toolCount int,
 	isStreaming bool,
 ) ([]config.ModelConfig, router.RouteResult, error) {
 	if requestedModel != "" {
 		if overrideResult, ok := h.modelRouter.RouteWithOverride(requestedModel); ok {
-			scenarioResult, err := h.routeOnce(routerMessages, tokenCount, "", isStreaming)
+			scenarioResult, err := h.routeOnce(routerMessages, tokenCount, toolCount, "", isStreaming)
 			if err != nil {
 				// Override is valid; surface the scenario routing error rather
 				// than silently dropping the safety net.
@@ -229,7 +273,7 @@ func (h *MessagesHandler) buildModelChain(
 		}
 	}
 
-	result, err := h.routeOnce(routerMessages, tokenCount, requestedModel, isStreaming)
+	result, err := h.routeOnce(routerMessages, tokenCount, toolCount, requestedModel, isStreaming)
 	if err != nil {
 		return nil, result, err
 	}
@@ -243,14 +287,16 @@ func (h *MessagesHandler) buildModelChain(
 func (h *MessagesHandler) routeOnce(
 	routerMessages []router.MessageContent,
 	tokenCount int,
+	toolCount int,
 	requestedModel string,
 	isStreaming bool,
 ) (router.RouteResult, error) {
 	if isStreaming && !h.modelRouter.IsStreamingScenarioRoutingEnabled() {
-		// Streaming: use faster models to minimize TTFT (time-to-first-token)
-		return h.modelRouter.RouteForStreaming(routerMessages, tokenCount, requestedModel), nil
+		// When false, RouteForStreaming prefers fast models (economy TTFT).
+		// When true, Route() applies full scenario rules to streaming as well.
+		return h.modelRouter.RouteForStreaming(routerMessages, tokenCount, toolCount, requestedModel), nil
 	}
-	return h.modelRouter.Route(routerMessages, tokenCount, requestedModel)
+	return h.modelRouter.Route(routerMessages, tokenCount, toolCount, requestedModel)
 }
 
 // appendUniqueModels appends models from extra to base, skipping any model_id
@@ -274,6 +320,20 @@ func appendUniqueModels(base, extra []config.ModelConfig) []config.ModelConfig {
 	return base
 }
 
+// ensureStreamTextPlaceholder opens the placeholder text block once per stream (for TTFT keepalives).
+func ensureStreamTextPlaceholder(rw *responseWriter, preamble *transformer.StreamPreamble) error {
+	if preamble.TextPlaceholderIndex >= 0 {
+		return nil
+	}
+	idx, err := transformer.WriteTextPlaceholderBlock(rw)
+	if err != nil {
+		return err
+	}
+	preamble.TextPlaceholderIndex = idx
+	rw.setKeepaliveIndex(idx)
+	return nil
+}
+
 // handleStreaming handles a streaming request with real-time SSE proxying.
 func (h *MessagesHandler) handleStreaming(
 	logger *slog.Logger,
@@ -284,8 +344,9 @@ func (h *MessagesHandler) handleStreaming(
 	rawBody json.RawMessage,
 ) {
 	clientCtx := r.Context()
+	clientModel := anthropicReq.Model
 
-	rw := &responseWriter{ResponseWriter: w}
+	rw := &responseWriter{ResponseWriter: w, textKeepaliveIndex: -1}
 
 	// Set SSE headers immediately so Claude Code knows the stream is alive.
 	// Use rw (not the bare ResponseWriter) so headers and flush stay consistent
@@ -297,11 +358,12 @@ func (h *MessagesHandler) handleStreaming(
 	rw.WriteHeader(http.StatusOK)
 	rw.Flush()
 
-	// Start heartbeat
+	// Anthropic ping events while waiting on upstream / between chunks.
+	// SSE comment keepalives do not reset Claude Code's ~6s inactivity timer.
 	var finished int32
 	heartbeatDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -310,8 +372,16 @@ func (h *MessagesHandler) handleStreaming(
 				if atomic.LoadInt32(&finished) == 1 {
 					return
 				}
-				_, _ = fmt.Fprintf(rw, ":keepalive\n\n")
-				rw.Flush()
+				var err error
+				idx := rw.keepaliveIndex()
+				if idx >= 0 {
+					err = transformer.WriteTextKeepalive(rw, idx)
+				} else {
+					err = transformer.WritePing(rw)
+				}
+				if err != nil {
+					return
+				}
 			case <-heartbeatDone:
 				return
 			case <-clientCtx.Done():
@@ -325,6 +395,19 @@ func (h *MessagesHandler) handleStreaming(
 	}()
 
 	streamStart := time.Now()
+
+	// One message_start per stream; model fallbacks must not emit another.
+	var streamPreamble transformer.StreamPreamble
+	if err := transformer.WriteMessageStart(rw, clientModel); err != nil {
+		if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+			logger.Info("client disconnected before stream preamble")
+			return
+		}
+		logger.Warn("failed to write message_start", "error", err)
+		h.sendStreamError(rw, "failed to start stream")
+		return
+	}
+	streamPreamble.MessageStartSent = true
 
 	for _, model := range modelChain {
 		select {
@@ -344,7 +427,16 @@ func (h *MessagesHandler) handleStreaming(
 			switch endpointType {
 			case client.EndpointAnthropic:
 				modelBody := replaceModelInRawBody(rawBody, model.ModelID)
-				if err := h.handleAnthropicStreaming(ctx, rw, modelBody, model.ModelID, model); err != nil {
+				if err := ensureStreamTextPlaceholder(rw, &streamPreamble); err != nil {
+					cancel()
+					if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+						logger.Info("client disconnected before anthropic stream")
+						return
+					}
+					logger.Warn("failed to write stream placeholder", "model", model.ModelID, "error", err)
+					continue
+				}
+				if err := h.handleAnthropicStreaming(ctx, rw, modelBody, model, streamPreamble); err != nil {
 					cancel()
 					if clientCtx.Err() == context.Canceled {
 						h.logger.Info("client disconnected during anthropic stream")
@@ -360,7 +452,16 @@ func (h *MessagesHandler) handleStreaming(
 				return
 
 			case client.EndpointResponses:
-				if err := h.handleResponsesStreaming(ctx, rw, anthropicReq, model, clientCtx); err != nil {
+				if err := ensureStreamTextPlaceholder(rw, &streamPreamble); err != nil {
+					cancel()
+					if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+						logger.Info("client disconnected before responses stream")
+						return
+					}
+					logger.Warn("failed to write stream placeholder", "model", model.ModelID, "error", err)
+					continue
+				}
+				if err := h.handleResponsesStreaming(ctx, rw, anthropicReq, model, clientCtx, clientModel, streamPreamble); err != nil {
 					cancel()
 					if clientCtx.Err() == context.Canceled {
 						h.logger.Info("client disconnected during responses stream")
@@ -376,7 +477,16 @@ func (h *MessagesHandler) handleStreaming(
 				return
 
 			case client.EndpointGemini:
-				if err := h.handleGeminiStreaming(ctx, rw, anthropicReq, model, clientCtx); err != nil {
+				if err := ensureStreamTextPlaceholder(rw, &streamPreamble); err != nil {
+					cancel()
+					if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+						logger.Info("client disconnected before gemini stream")
+						return
+					}
+					logger.Warn("failed to write stream placeholder", "model", model.ModelID, "error", err)
+					continue
+				}
+				if err := h.handleGeminiStreaming(ctx, rw, anthropicReq, model, clientCtx, clientModel, streamPreamble); err != nil {
 					cancel()
 					if clientCtx.Err() == context.Canceled {
 						h.logger.Info("client disconnected during gemini stream")
@@ -397,7 +507,16 @@ func (h *MessagesHandler) handleStreaming(
 		} else if client.IsAnthropicModel(model.ModelID) {
 			// Go provider Anthropic-native models (MiniMax, Qwen)
 			modelBody := replaceModelInRawBody(rawBody, model.ModelID)
-			if err := h.handleAnthropicStreaming(ctx, rw, modelBody, model.ModelID, model); err != nil {
+			if err := ensureStreamTextPlaceholder(rw, &streamPreamble); err != nil {
+				cancel()
+				if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+					logger.Info("client disconnected before anthropic stream")
+					return
+				}
+				logger.Warn("failed to write stream placeholder", "model", model.ModelID, "error", err)
+				continue
+			}
+			if err := h.handleAnthropicStreaming(ctx, rw, modelBody, model, streamPreamble); err != nil {
 				cancel()
 				if clientCtx.Err() == context.Canceled {
 					h.logger.Info("client disconnected during anthropic stream")
@@ -421,22 +540,45 @@ func (h *MessagesHandler) handleStreaming(
 			continue
 		}
 
-		streamBody, err := h.client.GetStreamingBody(ctx, model.ModelID, openaiReq, model)
-		if err != nil {
+		if err := ensureStreamTextPlaceholder(rw, &streamPreamble); err != nil {
 			cancel()
-			if clientCtx.Err() == context.Canceled {
-				logger.Info("client disconnected during upstream request")
+			if clientCtx.Err() == context.Canceled || err == transformer.ErrClientDisconnected {
+				logger.Info("client disconnected before upstream stream")
 				return
 			}
-			logger.Warn("streaming request failed", "model", model.ModelID, "error", err)
+			logger.Warn("failed to write stream placeholder", "model", model.ModelID, "error", err)
 			continue
 		}
 
-		if err := h.streamHandler.ProxyStream(rw, streamBody, model.ModelID, clientCtx); err != nil {
+		upstreamStart := time.Now()
+		streamBody, err := h.client.GetStreamingBody(ctx, model.ModelID, openaiReq, model)
+		upstreamConnect := time.Since(upstreamStart)
+		if err != nil {
+			cancel()
+			if clientCtx.Err() == context.Canceled {
+				logger.Info("client disconnected during upstream request",
+					"upstream_connect", upstreamConnect,
+				)
+				return
+			}
+			logger.Warn("streaming request failed", "model", model.ModelID, "error", err, "upstream_connect", upstreamConnect)
+			continue
+		}
+		logger.Info("upstream stream connected", "model", model.ModelID, "upstream_connect", upstreamConnect)
+
+		streamBody = &clearTextKeepaliveOnRead{
+			ReadCloser: streamBody,
+			clear:      func() { rw.setKeepaliveIndex(-1) },
+		}
+
+		if err := h.streamHandler.ProxyStream(rw, streamBody, clientModel, clientCtx, streamPreamble); err != nil {
 			_ = streamBody.Close()
 			cancel()
 			if err == transformer.ErrClientDisconnected {
-				logger.Info("client disconnected during stream")
+				logger.Info("client disconnected during stream",
+					"latency", time.Since(streamStart),
+					"client_canceled", clientCtx.Err() != nil,
+				)
 				return
 			}
 			if clientCtx.Err() == context.Canceled {
@@ -449,6 +591,7 @@ func (h *MessagesHandler) handleStreaming(
 
 		_ = streamBody.Close()
 		cancel()
+		rw.setKeepaliveIndex(-1)
 		latency := time.Since(streamStart)
 		h.metrics.RecordSuccess(model.ModelID, latency)
 		logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
@@ -470,6 +613,8 @@ func (h *MessagesHandler) handleResponsesStreaming(
 	anthropicReq *types.MessageRequest,
 	model config.ModelConfig,
 	clientCtx context.Context,
+	clientModel string,
+	preamble transformer.StreamPreamble,
 ) error {
 	req, err := h.requestTransformer.TransformToResponses(anthropicReq, model)
 	if err != nil {
@@ -481,7 +626,14 @@ func (h *MessagesHandler) handleResponsesStreaming(
 		return err
 	}
 
-	if err := h.streamHandler.ProxyResponsesStream(w, streamBody, model.ModelID, clientCtx); err != nil {
+	if rw, ok := w.(*responseWriter); ok {
+		streamBody = &clearTextKeepaliveOnRead{
+			ReadCloser: streamBody,
+			clear:      func() { rw.setKeepaliveIndex(-1) },
+		}
+	}
+
+	if err := h.streamHandler.ProxyResponsesStream(w, streamBody, clientModel, clientCtx, preamble); err != nil {
 		_ = streamBody.Close()
 		return err
 	}
@@ -497,6 +649,8 @@ func (h *MessagesHandler) handleGeminiStreaming(
 	anthropicReq *types.MessageRequest,
 	model config.ModelConfig,
 	clientCtx context.Context,
+	clientModel string,
+	preamble transformer.StreamPreamble,
 ) error {
 	req, err := h.requestTransformer.TransformToGemini(anthropicReq, model)
 	if err != nil {
@@ -508,7 +662,14 @@ func (h *MessagesHandler) handleGeminiStreaming(
 		return err
 	}
 
-	if err := h.streamHandler.ProxyGeminiStream(w, streamBody, model.ModelID, clientCtx); err != nil {
+	if rw, ok := w.(*responseWriter); ok {
+		streamBody = &clearTextKeepaliveOnRead{
+			ReadCloser: streamBody,
+			clear:      func() { rw.setKeepaliveIndex(-1) },
+		}
+	}
+
+	if err := h.streamHandler.ProxyGeminiStream(w, streamBody, clientModel, clientCtx, preamble); err != nil {
 		_ = streamBody.Close()
 		return err
 	}
@@ -544,11 +705,11 @@ func (h *MessagesHandler) handleAnthropicStreaming(
 	ctx context.Context,
 	w http.ResponseWriter,
 	rawBody json.RawMessage,
-	modelID string,
 	model config.ModelConfig,
+	preamble transformer.StreamPreamble,
 ) error {
 	h.logger.Debug("sending anthropic streaming request",
-		"model_id", modelID,
+		"model_id", model.ModelID,
 		"body_preview", string(rawBody)[:min(len(rawBody), 200)])
 
 	resp, err := h.client.SendAnthropicRequest(ctx, rawBody, true, model)
@@ -557,8 +718,15 @@ func (h *MessagesHandler) handleAnthropicStreaming(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
+	body := resp.Body
+	if rw, ok := w.(*responseWriter); ok {
+		body = &clearTextKeepaliveOnRead{
+			ReadCloser: resp.Body,
+			clear:      func() { rw.setKeepaliveIndex(-1) },
+		}
+	}
+
+	if err := transformer.CopyAnthropicSSE(w, body, preamble.MessageStartSent); err != nil {
 		if ctx.Err() == context.Canceled {
 			return transformer.ErrClientDisconnected
 		}

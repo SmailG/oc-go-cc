@@ -40,7 +40,7 @@ func TestRoute_RespectRequestedModel_BypassesScenarioRouting(t *testing.T) {
 		{Role: "user", Content: "Architect a new microservice"},
 	}
 
-	result, err := router.Route(messages, 100, "kimi-k2.6")
+	result, err := router.Route(messages, 100, 0, "kimi-k2.6")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRoute_RespectRequestedModel_False_UsesScenarioRouting(t *testing.T) {
 		{Role: "user", Content: "Architect a new microservice"},
 	}
 
-	result, err := router.Route(messages, 100, "kimi-k2.6")
+	result, err := router.Route(messages, 100, 0, "kimi-k2.6")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRoute_RespectRequestedModel_EmptyModel_FallsThrough(t *testing.T) {
 		{Role: "user", Content: "Hello"},
 	}
 
-	result, err := router.Route(messages, 100, "")
+	result, err := router.Route(messages, 100, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRoute_RespectRequestedModel_UnknownModel_UsesDefaults(t *testing.T) {
 		{Role: "user", Content: "Hello"},
 	}
 
-	result, err := router.Route(messages, 100, "some-unknown-model")
+	result, err := router.Route(messages, 100, 0, "some-unknown-model")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRouteForStreaming_RespectRequestedModel_BypassesScenarioRouting(t *test
 		{Role: "user", Content: "Hello"},
 	}
 
-	result := router.RouteForStreaming(messages, 100, "kimi-k2.6")
+	result := router.RouteForStreaming(messages, 100, 0, "kimi-k2.6")
 	if result.Primary.ModelID != "kimi-k2.6" {
 		t.Errorf("expected model kimi-k2.6, got %s", result.Primary.ModelID)
 	}
@@ -198,7 +198,7 @@ func TestRouteForStreaming_RespectRequestedModel_False_UsesScenarioRouting(t *te
 		{Role: "user", Content: "Hello"},
 	}
 
-	result := router.RouteForStreaming(messages, 100, "kimi-k2.6")
+	result := router.RouteForStreaming(messages, 100, 0, "kimi-k2.6")
 	// Should use streaming scenario routing, not the requested model
 	if result.Primary.ModelID != "qwen3.6-plus" {
 		t.Errorf("expected streaming model qwen3.6-plus, got %s", result.Primary.ModelID)

@@ -20,6 +20,19 @@ const (
 	ScenarioOverride    Scenario = "override"
 )
 
+// toolHeavyThreshold is the tool count above which requests are treated as complex.
+// Large tool schemas dominate upstream TTFT on the OpenAI endpoint; routing them to
+// "fast" models does not help because the POST body is huge.
+const toolHeavyThreshold = 64
+
+// agentToolThreshold is used in capability mode: any agent session with this many
+// tools or more is routed to complex (before keyword heuristics).
+const agentToolThreshold = 8
+
+func preferCapability(cfg *config.Config) bool {
+	return cfg != nil && cfg.PreferCapability
+}
+
 // ScenarioResult contains the detected scenario and token count.
 type ScenarioResult struct {
 	Scenario   Scenario
@@ -42,7 +55,7 @@ type MessageContent struct {
 //  5. Default
 //
 // For streaming requests, consider using RouteForStreaming() to prefer faster models.
-func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Config) ScenarioResult {
+func DetectScenario(messages []MessageContent, tokenCount int, toolCount int, cfg *config.Config) ScenarioResult {
 	// 1. Check for long context first (most important)
 	threshold := getLongContextThreshold(cfg)
 	if tokenCount > threshold {
@@ -53,7 +66,25 @@ func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Confi
 		}
 	}
 
-	// 2. Check for complex tasks (architectural OR tool-related)
+	// 2. Many tools → complex (large request bodies; do not downgrade to "fast" for streaming)
+	if toolCount >= toolHeavyThreshold {
+		return ScenarioResult{
+			Scenario:   ScenarioComplex,
+			TokenCount: tokenCount,
+			Reason:     fmt.Sprintf("%d tools (>= %d) — tool-heavy request", toolCount, toolHeavyThreshold),
+		}
+	}
+
+	// 2b. Capability mode: agent sessions with moderate tool counts need strong models.
+	if preferCapability(cfg) && toolCount >= agentToolThreshold {
+		return ScenarioResult{
+			Scenario:   ScenarioComplex,
+			TokenCount: tokenCount,
+			Reason:     fmt.Sprintf("%d tools (>= %d) — agent session (capability mode)", toolCount, agentToolThreshold),
+		}
+	}
+
+	// 3. Check for complex tasks (architectural OR tool-related)
 	if hasComplexPattern(messages) {
 		return ScenarioResult{
 			Scenario:   ScenarioComplex,
@@ -62,7 +93,7 @@ func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Confi
 		}
 	}
 
-	// 3. Check for thinking/reasoning patterns
+	// 4. Check for thinking/reasoning patterns
 	if hasThinkingPattern(messages) {
 		return ScenarioResult{
 			Scenario:   ScenarioThink,
@@ -71,20 +102,27 @@ func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Confi
 		}
 	}
 
-	// 4. Check for background task patterns (truly simple operations)
-	if hasBackgroundPattern(messages) {
-		return ScenarioResult{
-			Scenario:   ScenarioBackground,
-			TokenCount: tokenCount,
-			Reason:     "simple background task detected (use Qwen3.5 Plus)",
+	// 5. Check for background task patterns (truly simple operations).
+	// Capability mode: never use background tier when tools are present (Claude Code agent turns).
+	if toolCount == 0 || !preferCapability(cfg) {
+		if hasBackgroundPattern(messages) {
+			return ScenarioResult{
+				Scenario:   ScenarioBackground,
+				TokenCount: tokenCount,
+				Reason:     "simple background task detected (use Qwen3.5 Plus)",
+			}
 		}
 	}
 
-	// 5. Default
+	// 6. Default
+	reason := "default scenario (use Kimi K2.6)"
+	if preferCapability(cfg) {
+		reason = "default scenario (capability mode — use configured default model)"
+	}
 	return ScenarioResult{
 		Scenario:   ScenarioDefault,
 		TokenCount: tokenCount,
-		Reason:     "default scenario (use Kimi K2.6)",
+		Reason:     reason,
 	}
 }
 
@@ -195,10 +233,13 @@ func getLongContextThreshold(cfg *config.Config) int {
 // RouteForStreaming selects a model optimized for streaming latency.
 // For streaming, we prioritize fast TTFT (time-to-first-token) over capability.
 // This may return a less capable model but one that streams faster.
-func RouteForStreaming(messages []MessageContent, tokenCount int, cfg *config.Config) ScenarioResult {
-	// For streaming, use simpler models that have better TTFT
-	// Complex models (GLM, Kimi) are too slow for streaming with many tools
+func RouteForStreaming(messages []MessageContent, tokenCount int, toolCount int, cfg *config.Config) ScenarioResult {
+	// Capability / full scenario routing: same model picks as non-streaming (no qwen fast downgrade).
+	if cfg != nil && (cfg.PreferCapability || cfg.EnableStreamingScenarioRouting) {
+		return DetectScenario(messages, tokenCount, toolCount, cfg)
+	}
 
+	// Economy streaming: prefer fast TTFT (qwen) when prompts are small and simple.
 	threshold := getLongContextThreshold(cfg)
 	if tokenCount > threshold {
 		model := "long_context"
@@ -212,6 +253,11 @@ func RouteForStreaming(messages []MessageContent, tokenCount int, cfg *config.Co
 			TokenCount: tokenCount,
 			Reason:     fmt.Sprintf("high token count streaming (%d > %d) - use %s for acceptable TTFT", tokenCount, threshold, model),
 		}
+	}
+
+	// Tool-heavy prompts: use full scenario routing (not qwen "fast" with a megabyte of schemas).
+	if toolCount >= toolHeavyThreshold {
+		return DetectScenario(messages, tokenCount, toolCount, cfg)
 	}
 
 	if hasComplexPattern(messages) || hasThinkingPattern(messages) {

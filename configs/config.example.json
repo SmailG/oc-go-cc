@@ -3,9 +3,9 @@
   "host": "127.0.0.1",
   "port": 3456,
   "hot_reload": false,
-  "enable_streaming_scenario_routing": false,
+  "prefer_capability": true,
+  "enable_streaming_scenario_routing": true,
   "respect_requested_model": false,
-
   "models": {
     "background": {
       "provider": "opencode-go",
@@ -71,34 +71,68 @@
       "vision": true
     }
   },
-
   "fallbacks": {
     "background": [
-      { "provider": "opencode-go", "model_id": "qwen3.6-plus" },
-      { "provider": "opencode-go", "model_id": "minimax-m2.5" }
+      {
+        "provider": "opencode-go",
+        "model_id": "qwen3.6-plus"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "minimax-m2.5"
+      }
     ],
     "default": [
-      { "provider": "opencode-go", "model_id": "mimo-v2-pro" },
-      { "provider": "opencode-go", "model_id": "qwen3.6-plus" }
+      {
+        "provider": "opencode-go",
+        "model_id": "mimo-v2-pro"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "qwen3.6-plus"
+      }
     ],
     "long_context": [
-      { "provider": "opencode-go", "model_id": "minimax-m2.7" },
-      { "provider": "opencode-go", "model_id": "kimi-k2.6" }
+      {
+        "provider": "opencode-go",
+        "model_id": "minimax-m2.7"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "kimi-k2.6"
+      }
     ],
     "think": [
-      { "provider": "opencode-go", "model_id": "kimi-k2.6" },
-      { "provider": "opencode-go", "model_id": "mimo-v2-pro" }
+      {
+        "provider": "opencode-go",
+        "model_id": "kimi-k2.6"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "mimo-v2-pro"
+      }
     ],
     "complex": [
-      { "provider": "opencode-go", "model_id": "glm-5" },
-      { "provider": "opencode-go", "model_id": "kimi-k2.6" }
+      {
+        "provider": "opencode-go",
+        "model_id": "glm-5"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "kimi-k2.6"
+      }
     ],
     "fast": [
-      { "provider": "opencode-go", "model_id": "qwen3.5-plus" },
-      { "provider": "opencode-go", "model_id": "minimax-m2.5" }
+      {
+        "provider": "opencode-go",
+        "model_id": "qwen3.5-plus"
+      },
+      {
+        "provider": "opencode-go",
+        "model_id": "minimax-m2.5"
+      }
     ]
   },
-
   "model_overrides": {
     "claude-sonnet-4.5": {
       "provider": "opencode-zen",
@@ -181,13 +215,11 @@
       }
     }
   },
-
   "opencode_go": {
     "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
     "anthropic_base_url": "https://opencode.ai/zen/go/v1/messages",
     "timeout_ms": 300000
   },
-
   "opencode_zen": {
     "base_url": "https://opencode.ai/zen/v1/chat/completions",
     "anthropic_base_url": "https://opencode.ai/zen/v1/messages",
@@ -195,7 +227,6 @@
     "gemini_base_url": "https://opencode.ai/zen/v1/models",
     "timeout_ms": 300000
   },
-
   "logging": {
     "level": "info",
     "requests": true

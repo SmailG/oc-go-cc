@@ -163,6 +163,36 @@ When enabled, the proxy watches the config directory for changes (handling edito
 kill -HUP <PID>
 ```
 
+## Capability vs economy routing
+
+Two config presets ship in `configs/`:
+
+| File | Use when |
+|------|----------|
+| `config.example.json` | **Default — capability-first** (full scenario routing for streaming; higher cost) |
+| `config.economy.json` | Cost-optimized TTFT (qwen fast streaming, cheaper defaults) |
+
+Copy one into `~/.config/oc-go-cc/config.json` (or merge flags into your existing file):
+
+```bash
+cp configs/config.example.json ~/.config/oc-go-cc/config.json   # capable
+# cp configs/config.economy.json ~/.config/oc-go-cc/config.json  # economy
+```
+
+| Flag | Capability (`config.example.json`) | Economy (`config.economy.json`) |
+|------|----------------------------------|----------------------------------|
+| `prefer_capability` | `true` | `false` |
+| `enable_streaming_scenario_routing` | `true` | `false` |
+| Streaming (simple prompts) | Full scenario routing (no qwen downgrade) | `qwen3.6-plus` for TTFT |
+
+**`prefer_capability`** (recommended for Claude Code):
+
+- Streaming uses the same scenario rules as non-streaming (no automatic downgrade to qwen “fast”) when combined with `enable_streaming_scenario_routing`.
+- Agent turns with **≥8 tools** route to **complex**; **≥64 tools** always route to **complex** (large schemas).
+- Background tier is not used when tools are attached.
+
+Restart the proxy after changing config (`./bin/oc-go-cc stop && ./bin/oc-go-cc serve`).
+
 ## Model Routing
 
 The proxy automatically detects the type of request and routes to the appropriate model based on context size and content analysis:

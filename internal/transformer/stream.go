@@ -2,6 +2,7 @@
 package transformer
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -30,47 +31,127 @@ func NewStreamHandler() *StreamHandler {
 	}
 }
 
+// WriteMessageStart sends the initial Anthropic message_start SSE event.
+// clientModel must match the model Claude Code sent in the request (not the upstream ID).
+func WriteMessageStart(w http.ResponseWriter, clientModel string) error {
+	msgStart := types.MessageEvent{
+		Type: "message_start",
+		Message: &types.MessageResponse{
+			ID:      "msg_" + generateID(),
+			Type:    "message",
+			Role:    "assistant",
+			Content: []types.ContentBlock{},
+			Model:   clientModel,
+			Usage:   types.Usage{OutputTokens: 1},
+		},
+	}
+	if err := writeSSEEvent(w, msgStart); err != nil {
+		return ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+// StreamPreamble tracks SSE frames sent before the upstream body is connected.
+type StreamPreamble struct {
+	MessageStartSent     bool
+	TextPlaceholderIndex int // index of open placeholder text block, or -1
+}
+
+// WriteTextPlaceholderBlock opens an empty text content block for TTFT text_delta keepalives.
+func WriteTextPlaceholderBlock(w http.ResponseWriter) (int, error) {
+	idx := 0
+	startEvent := types.MessageEvent{
+		Type:         "content_block_start",
+		Index:        &idx,
+		ContentBlock: &types.ContentBlock{Type: "text", Text: ""},
+	}
+	if err := writeSSEEvent(w, startEvent); err != nil {
+		return -1, ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return idx, nil
+}
+
+// WriteStreamPreamble sends message_start plus a placeholder text block so Claude Code
+// sees content_block activity during slow upstream TTFT. Thinking keepalives do not
+// reset the client "Cooked/Brewed" timer; text_delta does.
+func WriteStreamPreamble(w http.ResponseWriter, clientModel string) (StreamPreamble, error) {
+	if err := WriteMessageStart(w, clientModel); err != nil {
+		return StreamPreamble{}, err
+	}
+	idx, err := WriteTextPlaceholderBlock(w)
+	if err != nil {
+		return StreamPreamble{}, err
+	}
+	return StreamPreamble{MessageStartSent: true, TextPlaceholderIndex: idx}, nil
+}
+
+// WritePing sends an Anthropic keep-alive ping event.
+func WritePing(w http.ResponseWriter) error {
+	if err := writeSSEEvent(w, types.MessageEvent{Type: "ping"}); err != nil {
+		return ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+// WriteTextKeepalive emits a minimal text_delta on an open text block (TTFT keepalive).
+func WriteTextKeepalive(w http.ResponseWriter, index int) error {
+	idx := index
+	event := types.MessageEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.Delta{Type: "text_delta", Text: " "},
+	}
+	if err := writeSSEEvent(w, event); err != nil {
+		return ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
 // ProxyStream takes an OpenAI streaming response and writes Anthropic-format SSE to the writer.
 // It reads OpenAI ChatCompletionChunk SSE events and transforms them into Anthropic MessageEvent SSE events.
 // The clientCtx is used to detect client disconnection and abort early.
+// When preamble has MessageStartSent, message_start was already written before upstream connect.
 //
 // CRITICAL: This function reads directly from resp.Body without buffering to minimize latency.
 // Per deep research: "Don't use bufio.Scanner or bufio.Reader on the response body - it adds buffering"
 func (h *StreamHandler) ProxyStream(
 	w http.ResponseWriter,
 	openaiResp io.ReadCloser,
-	originalModel string,
+	clientModel string,
 	clientCtx context.Context,
+	preamble StreamPreamble,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported by response writer")
 	}
 
-	// Generate a unique message ID for this stream.
-	msgID := "msg_" + generateID()
-
-	// Send message_start event with the full message envelope.
-	msgStart := types.MessageEvent{
-		Type: "message_start",
-		Message: &types.MessageResponse{
-			ID:      msgID,
-			Type:    "message",
-			Role:    "assistant",
-			Content: []types.ContentBlock{},
-			Model:   originalModel,
-		},
+	if !preamble.MessageStartSent {
+		if err := WriteMessageStart(w, clientModel); err != nil {
+			return err
+		}
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
-		return ErrClientDisconnected
-	}
-	flusher.Flush()
 
 	// Read directly from response body without buffering.
 	// Use a tight loop with a line buffer - no bufio.Reader.
 	contentIndex := 0
 	var lineBuf bytes.Buffer
-	contentStarted := false
+	contentStarted := preamble.MessageStartSent && preamble.TextPlaceholderIndex >= 0
+	if contentStarted {
+		contentIndex = preamble.TextPlaceholderIndex
+	}
 	reasoningStarted := false
 	stopSent := false
 	toolUseCount := 0
@@ -98,7 +179,7 @@ func (h *StreamHandler) ProxyStream(
 					lineBuf.Reset()
 
 					// Process complete line
-					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, originalModel); err != nil {
+					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel); err != nil {
 						return err
 					}
 				} else {
@@ -111,7 +192,7 @@ func (h *StreamHandler) ProxyStream(
 			// Process any remaining data in buffer
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, originalModel); err != nil {
+				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel); err != nil {
 					return err
 				}
 			}
@@ -122,17 +203,8 @@ func (h *StreamHandler) ProxyStream(
 		}
 	}
 
-	// Close any open content block (text or reasoning)
-	if contentStarted || reasoningStarted {
-		stopEvent := types.MessageEvent{
-			Type:  "content_block_stop",
-			Index: &contentIndex,
-		}
-		if err := writeSSEEvent(w, stopEvent); err != nil {
-			return ErrClientDisconnected
-		}
-		contentStarted = false
-		reasoningStarted = false
+	if err := closeOpenStreamBlocks(w, &contentIndex, &contentStarted, &reasoningStarted); err != nil {
+		return err
 	}
 
 	// Send stop events for any tool blocks not yet closed (e.g. upstream
@@ -194,6 +266,52 @@ func (h *StreamHandler) ProxyStream(
 	return nil
 }
 
+func closeActiveContentBlock(
+	w http.ResponseWriter,
+	contentIndex *int,
+	contentStarted *bool,
+	reasoningStarted *bool,
+) error {
+	if !*contentStarted && !*reasoningStarted {
+		return nil
+	}
+	idx := *contentIndex
+	stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
+	if err := writeSSEEvent(w, stopEvent); err != nil {
+		return ErrClientDisconnected
+	}
+	*contentIndex++
+	*reasoningStarted = false
+	*contentStarted = false
+	return nil
+}
+
+func closeOpenStreamBlocks(
+	w http.ResponseWriter,
+	contentIndex *int,
+	contentStarted *bool,
+	reasoningStarted *bool,
+) error {
+	if *reasoningStarted {
+		idx := *contentIndex
+		stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
+		if err := writeSSEEvent(w, stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
+		*contentIndex++
+		*reasoningStarted = false
+	}
+	if *contentStarted {
+		idx := *contentIndex
+		stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
+		if err := writeSSEEvent(w, stopEvent); err != nil {
+			return ErrClientDisconnected
+		}
+		*contentStarted = false
+	}
+	return nil
+}
+
 // processSSELine processes a single SSE line from upstream.
 // Per deep research: "Treat SSE primarily as a text protocol" - minimize JSON parsing.
 func (h *StreamHandler) processSSELine(
@@ -206,7 +324,7 @@ func (h *StreamHandler) processSSELine(
 	stopSent *bool,
 	toolUseCount *int,
 	startedToolCalls map[int]int,
-	originalModel string,
+	clientModel string,
 ) error {
 	line = strings.TrimSpace(line)
 
@@ -480,17 +598,8 @@ func (h *StreamHandler) processSSELine(
 
 	// Handle finish reason
 	if choice.FinishReason != "" {
-		// Close any open content block (reasoning or text)
-		if *contentStarted || *reasoningStarted {
-			stopEvent := types.MessageEvent{
-				Type:  "content_block_stop",
-				Index: contentIndex,
-			}
-			if err := writeSSEEvent(w, stopEvent); err != nil {
-				return ErrClientDisconnected
-			}
-			*contentStarted = false
-			*reasoningStarted = false
+		if err := closeActiveContentBlock(w, contentIndex, contentStarted, reasoningStarted); err != nil {
+			return err
 		}
 
 		// Close any open tool_use blocks in ascending index order.
@@ -593,37 +702,95 @@ func generateID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+// CopyAnthropicSSE copies Anthropic-format SSE from upstream to the client. When
+// skipMessageStart is true, the first message_start event is dropped (already sent as preamble).
+func CopyAnthropicSSE(w io.Writer, r io.Reader, skipMessageStart bool) error {
+	if !skipMessageStart {
+		_, err := io.Copy(w, r)
+		return err
+	}
+
+	br := bufio.NewReader(r)
+	for {
+		event, err := readSSEEventBlock(br)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if skipMessageStart && isMessageStartSSEBlock(event) {
+			skipMessageStart = false
+			continue
+		}
+		if _, err := w.Write(event); err != nil {
+			return err
+		}
+	}
+}
+
+func readSSEEventBlock(br *bufio.Reader) ([]byte, error) {
+	var block bytes.Buffer
+	for {
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			block.WriteString(line)
+		}
+		if err != nil {
+			if err == io.EOF {
+				if block.Len() == 0 {
+					return nil, io.EOF
+				}
+				return block.Bytes(), nil
+			}
+			return nil, err
+		}
+		if line == "\n" && block.Len() > 0 {
+			return block.Bytes(), nil
+		}
+	}
+}
+
+func isMessageStartSSEBlock(block []byte) bool {
+	for _, line := range strings.Split(string(block), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var ev types.MessageEvent
+		if json.Unmarshal([]byte(data), &ev) == nil && ev.Type == "message_start" {
+			return true
+		}
+	}
+	return false
+}
+
 // ProxyResponsesStream takes an OpenAI Responses streaming response and writes Anthropic-format SSE.
 func (h *StreamHandler) ProxyResponsesStream(
 	w http.ResponseWriter,
 	responsesResp io.ReadCloser,
-	originalModel string,
+	clientModel string,
 	clientCtx context.Context,
+	preamble StreamPreamble,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported by response writer")
 	}
 
-	msgID := "msg_" + generateID()
-	msgStart := types.MessageEvent{
-		Type: "message_start",
-		Message: &types.MessageResponse{
-			ID:      msgID,
-			Type:    "message",
-			Role:    "assistant",
-			Content: []types.ContentBlock{},
-			Model:   originalModel,
-		},
+	if !preamble.MessageStartSent {
+		if err := WriteMessageStart(w, clientModel); err != nil {
+			return err
+		}
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
-		return ErrClientDisconnected
-	}
-	flusher.Flush()
 
 	contentIndex := 0
 	var lineBuf bytes.Buffer
-	contentStarted := false
+	contentStarted := preamble.MessageStartSent && preamble.TextPlaceholderIndex >= 0
+	if contentStarted {
+		contentIndex = preamble.TextPlaceholderIndex
+	}
 	stopSent := false
 	readBuf := make([]byte, 4096)
 
@@ -641,7 +808,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 				if b == '\n' {
 					line := lineBuf.String()
 					lineBuf.Reset()
-					if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, originalModel); err != nil {
+					if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
 						return err
 					}
 				} else {
@@ -653,7 +820,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 		if err == io.EOF {
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, originalModel); err != nil {
+				if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
 					return err
 				}
 			}
@@ -775,33 +942,27 @@ func (h *StreamHandler) processResponsesSSELine(
 func (h *StreamHandler) ProxyGeminiStream(
 	w http.ResponseWriter,
 	geminiResp io.ReadCloser,
-	originalModel string,
+	clientModel string,
 	clientCtx context.Context,
+	preamble StreamPreamble,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported by response writer")
 	}
 
-	msgID := "msg_" + generateID()
-	msgStart := types.MessageEvent{
-		Type: "message_start",
-		Message: &types.MessageResponse{
-			ID:      msgID,
-			Type:    "message",
-			Role:    "assistant",
-			Content: []types.ContentBlock{},
-			Model:   originalModel,
-		},
+	if !preamble.MessageStartSent {
+		if err := WriteMessageStart(w, clientModel); err != nil {
+			return err
+		}
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
-		return ErrClientDisconnected
-	}
-	flusher.Flush()
 
 	contentIndex := 0
 	var lineBuf bytes.Buffer
-	contentStarted := false
+	contentStarted := preamble.MessageStartSent && preamble.TextPlaceholderIndex >= 0
+	if contentStarted {
+		contentIndex = preamble.TextPlaceholderIndex
+	}
 	stopSent := false
 	readBuf := make([]byte, 4096)
 
@@ -819,7 +980,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 				if b == '\n' {
 					line := lineBuf.String()
 					lineBuf.Reset()
-					if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, originalModel); err != nil {
+					if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
 						return err
 					}
 				} else {
@@ -831,7 +992,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 		if err == io.EOF {
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, originalModel); err != nil {
+				if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
 					return err
 				}
 			}
