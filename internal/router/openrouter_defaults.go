@@ -30,19 +30,19 @@ func OpenRouterProfile() (map[string]config.ModelConfig, map[string][]config.Mod
 		},
 		string(ScenarioDefault): {
 			Provider:    config.ProviderOpenRouter,
-			ModelID:     "moonshotai/kimi-k2.5",
+			ModelID:     "minimax/minimax-m3",
 			Temperature: 0.7,
 			MaxTokens:   4096,
 		},
 		string(ScenarioThink): {
 			Provider:    config.ProviderOpenRouter,
-			ModelID:     "z-ai/glm-5",
+			ModelID:     "z-ai/glm-5.2",
 			Temperature: 0.7,
 			MaxTokens:   8192,
 		},
 		string(ScenarioComplex): {
 			Provider:    config.ProviderOpenRouter,
-			ModelID:     "z-ai/glm-5",
+			ModelID:     "z-ai/glm-5.2",
 			Temperature: 0.7,
 			MaxTokens:   4096,
 		},
@@ -63,28 +63,29 @@ func OpenRouterProfile() (map[string]config.ModelConfig, map[string][]config.Mod
 
 	fallbacks := map[string][]config.ModelConfig{
 		string(ScenarioDefault): {
-			{Provider: config.ProviderOpenRouter, ModelID: "z-ai/glm-5"},
 			{Provider: config.ProviderOpenRouter, ModelID: "minimax/minimax-m3"},
+			{Provider: config.ProviderOpenRouter, ModelID: "z-ai/glm-5.1"},
 		},
 		string(ScenarioBackground): {
-			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.5"},
 			{Provider: config.ProviderOpenRouter, ModelID: "minimax/minimax-m3"},
+			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.6"},
 		},
 		string(ScenarioThink): {
-			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.5"},
 			{Provider: config.ProviderOpenRouter, ModelID: "minimax/minimax-m3"},
+			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.6"},
 		},
 		string(ScenarioComplex): {
-			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.5"},
+			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.6"},
 			{Provider: config.ProviderOpenRouter, ModelID: "minimax/minimax-m3"},
+			{Provider: config.ProviderOpenRouter, ModelID: "z-ai/glm-5.2"},
 		},
 		string(ScenarioLongContext): {
-			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.5"},
-			{Provider: config.ProviderOpenRouter, ModelID: "z-ai/glm-5"},
+			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.6"},
+			{Provider: config.ProviderOpenRouter, ModelID: "z-ai/glm-5.2"},
 		},
 		string(ScenarioFast): {
-			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.5"},
 			{Provider: config.ProviderOpenRouter, ModelID: "minimax/minimax-m3"},
+			{Provider: config.ProviderOpenRouter, ModelID: "moonshotai/kimi-k2.6"},
 		},
 	}
 

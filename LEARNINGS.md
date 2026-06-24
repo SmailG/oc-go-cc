@@ -13,6 +13,8 @@ Keep `AGENTS.md` focused on the project runbook; put “things we learned” her
 
 - Some OpenAI-compatible providers reject unknown fields inside OpenAI `messages` (e.g. `messages[0].cache_control`).
   - For OpenAI Chat Completions requests, do **not** forward Anthropic `cache_control` into `messages`.
+- OpenRouter's Anthropic Skin (`/v1/messages`) accepts raw Anthropic-format requests for any model in its catalog. Stream cancellation is NOT supported for MiniMax on OpenRouter (per docs); billing continues if Claude Code disconnects mid-stream. The Anthropic Skin returns `redacted_thinking` blocks alongside `thinking` blocks — Claude Code may not handle `redacted_thinking` (worth a real-session smoke test, currently unverified).
+- The `routing_profile: "openrouter"` config field replaces user `models`/`fallbacks` with a built-in OpenRouter-only model set. When active, scenario detection reads the profile's model map (so `long_context` threshold works correctly even with empty user config). Profile is registered as a known value in `internal/config/loader.go`'s `routingProfileRegistry` map — no `init()` callback needed.
 
 ### Operational gotchas
 

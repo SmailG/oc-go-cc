@@ -34,10 +34,14 @@ make build
 - **Model routing is config-driven, not code-driven**
   - Models are defined in `~/.config/oc-go-cc/config.json`.
   - Adding a new model **should not require code changes**, except when it requires the Anthropic endpoint (see `IsAnthropicModel()`).
-- **Two upstream API endpoints**
-  - OpenAI endpoint (`/v1/chat/completions`): used by most models (GLM, Kimi, MiMo, Qwen).
-  - Anthropic endpoint (`/v1/messages`): used only by MiniMax models.
-  - `internal/client/opencode.go` routes by model ID via `IsAnthropicModel()`.
+- **Three upstream providers** (selected per-model via `provider` field in config)
+  - `opencode-go` (default): OpenAI-compatible `/v1/chat/completions` + Anthropic-format `/v1/messages` for MiniMax/Qwen. Subscription billing.
+  - `opencode-zen`: same surface plus `/v1/responses` (GPT) and `/v1/models/{id}` (Gemini). Pay-as-you-go.
+  - `openrouter`: Anthropic-format `/v1/messages` ("Anthropic Skin") + OpenAI-compatible `/v1/chat/completions`. Pay-as-you-go. Bearer auth via `OC_GO_CC_OPENROUTER_API_KEY`. Provider constants in `internal/config/config.go`.
+  - `internal/client/opencode.go` routes by provider + `IsAnthropicModel()` for endpoint format.
+- **Routing profiles** (`routing_profile` config field, enum string)
+  - `""` (default): uses user-configured `models`/`fallbacks` blocks as-is.
+  - `"openrouter"`: replaces `models`/`fallbacks` with built-in OpenRouter-only model set in `internal/router/openrouter_defaults.go`. Scenario detection still runs (uses the profile's `long_context` threshold of 80K). `model_overrides` continue to work for explicit user-requested models. Env override: `OC_GO_CC_ROUTING_PROFILE`. Reference config: `configs/config.openrouter.json`.
 
 ### Scenario selection priority
 
