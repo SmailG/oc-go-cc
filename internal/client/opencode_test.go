@@ -134,6 +134,11 @@ func TestProvider(t *testing.T) {
 			model:    config.ModelConfig{Provider: ProviderOpenCodeZen, ModelID: "test-model"},
 			expected: ProviderOpenCodeZen,
 		},
+		{
+			name:     "explicit openrouter provider",
+			model:    config.ModelConfig{Provider: ProviderOpenRouter, ModelID: "test-model"},
+			expected: ProviderOpenRouter,
+		},
 	}
 
 	for _, tt := range tests {
@@ -172,6 +177,43 @@ func TestIsZen(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsZen(tt.model); got != tt.expected {
 				t.Fatalf("IsZen() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsOpenRouter(t *testing.T) {
+	tests := []struct {
+		name     string
+		model    config.ModelConfig
+		expected bool
+	}{
+		{
+			name:     "opencode-go is not openrouter",
+			model:    config.ModelConfig{Provider: ProviderOpenCodeGo},
+			expected: false,
+		},
+		{
+			name:     "opencode-zen is not openrouter",
+			model:    config.ModelConfig{Provider: ProviderOpenCodeZen},
+			expected: false,
+		},
+		{
+			name:     "openrouter is openrouter",
+			model:    config.ModelConfig{Provider: ProviderOpenRouter},
+			expected: true,
+		},
+		{
+			name:     "empty provider is not openrouter",
+			model:    config.ModelConfig{},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsOpenRouter(tt.model); got != tt.expected {
+				t.Fatalf("IsOpenRouter() = %v, want %v", got, tt.expected)
 			}
 		})
 	}

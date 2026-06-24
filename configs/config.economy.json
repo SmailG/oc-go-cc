@@ -34,7 +34,7 @@
     },
     "complex": {
       "provider": "opencode-go",
-      "model_id": "glm-5.1",
+      "model_id": "kimi-k2.6",
       "temperature": 0.7,
       "max_tokens": 4096
     },
@@ -89,11 +89,11 @@
     "complex": [
       {
         "provider": "opencode-go",
-        "model_id": "glm-5"
+        "model_id": "glm-5.1"
       },
       {
         "provider": "opencode-go",
-        "model_id": "kimi-k2.6"
+        "model_id": "glm-5"
       }
     ],
     "fast": [

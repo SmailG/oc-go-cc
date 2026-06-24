@@ -91,11 +91,15 @@ make test
 
 - Local proxy for Claude Code: `http://127.0.0.1:3456` with `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN=unused`.
 - Heavy Claude Code streams often cancel after ~9–11s with `client_canceled=true` when upstream TTFT is slow and the client sees no real `content_block_*` activity.
-- Tool-heavy threshold is **64 tools** (`internal/router/scenarios.go`); at or above that, routing uses **complex** (GLM), not streaming-fast Qwen, even when `stream=true`.
-- Streaming to Claude Code: send `message_start` with the **requested** client model before upstream connects; use placeholder **text** `content_block_start` plus periodic `text_delta` keepalives until the first upstream byte (SSE comment `:keepalive` and `ping` alone are insufficient).
+- Tool-heavy threshold is **64 tools** (`internal/router/scenarios.go`); at or above that, routing uses **complex**, not streaming-fast Qwen, even when `stream=true`. Economy preset maps **complex** to **kimi-k2.6** (GLM fallbacks); capability config uses GLM-5.1.
+- Streaming to Claude Code: send `message_start` with the **requested** client model before upstream connects; use placeholder **text** `content_block_start` plus periodic `text_delta` keepalives until real **text** or **tool_use** output arrives. **StreamActivity** stops keepalives on the first **client-visible** Anthropic event, not the first upstream byte. If upstream sends `reasoning_content` first (e.g. GLM), buffer it and keep the preamble text block open — closing early stops keepalives. On **tool-only** turns, skip thinking SSE flush and go straight to `tool_use`. `thinking_delta` and `ping` do not reset Claude's ~6s inactivity timer; gap keepalives must use `text_delta`. SSE comment `:keepalive` alone is insufficient.
+- Upstream stream reads use `ctxReadCloser(clientCtx, …)` so Claude Code disconnect aborts blocked upstream `Read()` (handler timeout uses `clientCtx`, not `context.Background()`).
+- Streaming model-chain fallback does not retry on `client disconnected` / `ErrClientDisconnected` — the HTTP connection is already closed; Claude Code may open a separate non-streaming request on the same model.
 - All streaming SSE writes share one mutex on the handler `responseWriter` (heartbeat goroutine and `ProxyStream` must not write concurrently).
 - Streaming logs include `upstream_connect` latency and `request_id`; correlate with `~/.claude/debug/latest` on disconnect investigations.
 - `client disconnected during stream` means the HTTP client closed or canceled (`r.Context()`), not necessarily a proxy transform/upstream failure.
+- Active runtime config uses the economy preset (`prefer_capability=false`, `enable_streaming_scenario_routing=false`; see `configs/config.economy.json`) unless the user copies `config.example.json` for capability-first routing.
+- Start proxy with `./bin/oc-go-cc serve --background` (not foreground `serve`); bare `serve` dies when the terminal closes. Avoid `stop && serve` when `stop` may fail — run separately.
 
 ### Learnings / memory
 

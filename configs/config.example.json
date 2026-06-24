@@ -199,8 +199,8 @@
       "max_tokens": 4096
     },
     "minimax-m3": {
-      "provider": "opencode-go",
-      "model_id": "minimax-m3",
+      "provider": "openrouter",
+      "model_id": "minimax/minimax-m3",
       "temperature": 0.7,
       "max_tokens": 4096
     },
@@ -225,6 +225,12 @@
     "anthropic_base_url": "https://opencode.ai/zen/v1/messages",
     "responses_base_url": "https://opencode.ai/zen/v1/responses",
     "gemini_base_url": "https://opencode.ai/zen/v1/models",
+    "timeout_ms": 300000
+  },
+  "openrouter": {
+    "api_key": "${OC_GO_CC_OPENROUTER_API_KEY}",
+    "base_url": "https://openrouter.ai/api/v1/chat/completions",
+    "anthropic_base_url": "https://openrouter.ai/api/v1/messages",
     "timeout_ms": 300000
   },
   "logging": {

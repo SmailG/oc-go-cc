@@ -23,6 +23,9 @@ const (
 	defaultZenAnthropicBaseURL = "https://opencode.ai/zen/v1/messages"
 	defaultZenResponsesBaseURL = "https://opencode.ai/zen/v1/responses"
 	defaultZenGeminiBaseURL    = "https://opencode.ai/zen/v1/models"
+
+	defaultOpenRouterBaseURL          = "https://openrouter.ai/api/v1/chat/completions"
+	defaultOpenRouterAnthropicBaseURL = "https://openrouter.ai/api/v1/messages"
 )
 
 // envVarPattern matches ${ENV_VAR} placeholders in config values.
@@ -124,6 +127,16 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("OC_GO_CC_OPENCODE_ZEN_URL"); v != "" {
 		cfg.OpenCodeZen.BaseURL = v
 	}
+	if v := os.Getenv("OC_GO_CC_OPENROUTER_API_KEY"); v != "" {
+		cfg.OpenRouter.APIKey = v
+		cfg.OpenRouter.APIKeys = nil
+	}
+	if v := os.Getenv("OC_GO_CC_OPENROUTER_URL"); v != "" {
+		cfg.OpenRouter.AnthropicBaseURL = v
+	}
+	if v := os.Getenv("OC_GO_CC_ROUTING_PROFILE"); v != "" {
+		cfg.RoutingProfile = RoutingProfile(v)
+	}
 	if v := os.Getenv("OC_GO_CC_LOG_LEVEL"); v != "" {
 		cfg.Logging.Level = v
 	}
@@ -161,6 +174,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.OpenCodeZen.TimeoutMs == 0 {
 		cfg.OpenCodeZen.TimeoutMs = defaultTimeoutMs
 	}
+	if cfg.OpenRouter.AnthropicBaseURL == "" {
+		cfg.OpenRouter.AnthropicBaseURL = defaultOpenRouterAnthropicBaseURL
+	}
+	if cfg.OpenRouter.BaseURL == "" {
+		cfg.OpenRouter.BaseURL = defaultOpenRouterBaseURL
+	}
+	if cfg.OpenRouter.TimeoutMs == 0 {
+		cfg.OpenRouter.TimeoutMs = defaultTimeoutMs
+	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = defaultLogLevel
 	}
@@ -184,6 +206,39 @@ func validate(cfg *Config) error {
 
 	if err := validateModelOverrides(cfg.ModelOverrides); err != nil {
 		return err
+	}
+
+	if err := validateRoutingProfile(cfg.RoutingProfile); err != nil {
+		return err
+	}
+	return nil
+}
+
+// routingProfileRegistry is populated at init() time below with built-in
+// profile names. The router package provides the actual model sets via
+// RegisterRoutingProfile; config only validates that the profile name is
+// recognized.
+var routingProfileRegistry = map[RoutingProfile]struct{}{
+	RoutingProfileOpenRouter: {},
+}
+
+func knownProfileNames() string {
+	names := make([]string, 0, len(routingProfileRegistry))
+	for p := range routingProfileRegistry {
+		names = append(names, string(p))
+	}
+	return strings.Join(names, ", ")
+}
+
+// validateRoutingProfile accepts empty (legacy behavior) or any built-in
+// profile name. Unknown non-empty values are rejected to surface typos at
+// config-load time rather than mid-request.
+func validateRoutingProfile(p RoutingProfile) error {
+	if p == "" {
+		return nil
+	}
+	if _, ok := routingProfileRegistry[p]; !ok {
+		return fmt.Errorf("routing_profile %q is not recognized (must be \"\" or one of: %s)", p, knownProfileNames())
 	}
 	return nil
 }
@@ -212,8 +267,8 @@ func validateModelOverrides(overrides map[string]ModelConfig) error {
 		if mc.ModelID == "" {
 			return fmt.Errorf("model_overrides[%q] is missing required field model_id", key)
 		}
-		if mc.Provider != "" && mc.Provider != "opencode-go" && mc.Provider != "opencode-zen" {
-			return fmt.Errorf("model_overrides[%q] has invalid provider %q (must be \"opencode-go\" or \"opencode-zen\")", key, mc.Provider)
+		if mc.Provider != "" && mc.Provider != "opencode-go" && mc.Provider != "opencode-zen" && mc.Provider != "openrouter" {
+			return fmt.Errorf("model_overrides[%q] has invalid provider %q (must be \"opencode-go\", \"opencode-zen\", or \"openrouter\")", key, mc.Provider)
 		}
 	}
 	return nil

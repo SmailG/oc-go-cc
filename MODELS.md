@@ -35,6 +35,80 @@ Comprehensive guide to OpenCode Go and Zen models with capabilities, costs, and 
 - Additional endpoint formats: Responses (GPT), Gemini
 - Best for: GPT models, Gemini models, premium Anthropic models
 
+### OpenRouter (`openrouter`)
+
+- Pay-as-you-go pricing; uses OpenRouter API key
+- Supports both endpoint formats:
+  - **Anthropic Skin** (`/v1/messages`) — raw Anthropic-format passthrough for any model (e.g. `minimax/minimax-m3`)
+  - **OpenAI Chat Completions** (`/v1/chat/completions`) — for OpenAI-format models on OpenRouter (GLM/Kimi/Qwen/DeepSeek/MiMo/etc.). Claude Code's Anthropic request is transformed to OpenAI format by oc-go-cc using its existing transformer pipeline.
+- Config example:
+
+```json
+{
+  "models": {
+    "minimax-m3": {
+      "provider": "openrouter",
+      "model_id": "minimax/minimax-m3",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "glm-5": {
+      "provider": "openrouter",
+      "model_id": "z-ai/glm-5",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    }
+  },
+  "openrouter": {
+    "api_key": "${OC_GO_CC_OPENROUTER_API_KEY}",
+    "base_url": "https://openrouter.ai/api/v1/chat/completions",
+    "anthropic_base_url": "https://openrouter.ai/api/v1/messages",
+    "timeout_ms": 300000
+  }
+}
+```
+
+Routing between endpoints is automatic: models in `IsAnthropicModel()` use the Anthropic Skin, all others use the OpenAI endpoint.
+
+## Routing Profiles
+
+`routing_profile` selects a built-in model set that replaces your `models`/`fallbacks` blocks. Recognized values:
+
+- `""` (default) — your `models`/`fallbacks` blocks are used as-is (legacy behavior)
+- `"openrouter"` — replaces everything with a fixed OpenRouter-only model set (see `configs/config.openrouter.json`)
+
+### `routing_profile: "openrouter"`
+
+Use this when opencode-go/opencode-zen are unavailable, throttled, or too expensive, and you want every scenario routed through OpenRouter. The profile ships with a sensible default model set:
+
+| Scenario | OpenRouter model | Notes |
+|---|---|---|
+| `background` | `qwen/qwen3-coder` | Cheap, fast; no-tool simple requests |
+| `default` | `moonshotai/kimi-k2.5` | General purpose |
+| `think` | `z-ai/glm-5` | Reasoning tasks |
+| `complex` | `z-ai/glm-5` | Multi-tool / architectural requests |
+| `long_context` | `minimax/minimax-m3` | >80K tokens (1M context window) |
+| `fast` | `qwen/qwen3-coder` | Streaming TTFT |
+
+Fallback chains within OpenRouter provide graceful degradation when a primary model errors or is rate-limited.
+
+Enable with config:
+
+```json
+{
+  "routing_profile": "openrouter",
+  "openrouter": {
+    "api_key": "${OC_GO_CC_OPENROUTER_API_KEY}"
+  }
+}
+```
+
+Or via env var: `OC_GO_CC_ROUTING_PROFILE=openrouter`
+
+When the profile is active, the user's `models` and `fallbacks` blocks are ignored — scenario detection still runs (keyword/tool/token heuristics), but routing always uses the profile's model set. `model_overrides` continue to work for explicit user-requested models.
+
+A reference config is provided at `configs/config.openrouter.json` (uses OpenRouter-only routing with no `models`/`fallbacks` blocks).
+
 ## Important: API Endpoints
 
 ⚠️ **Critical:** Not all models use the same API endpoint! oc-go-cc handles this automatically, but you should know:

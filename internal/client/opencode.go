@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	ProviderOpenCodeGo  = "opencode-go"
-	ProviderOpenCodeZen = "opencode-zen"
+	ProviderOpenCodeGo  = config.ProviderOpenCodeGo
+	ProviderOpenCodeZen = config.ProviderOpenCodeZen
+	ProviderOpenRouter  = config.ProviderOpenRouter
 )
 
 // OpenCodeClient handles communication with OpenCode Go and Zen APIs.
@@ -105,6 +106,11 @@ func IsZen(model config.ModelConfig) bool {
 	return Provider(model) == ProviderOpenCodeZen
 }
 
+// IsOpenRouter returns true if the model uses the OpenRouter provider.
+func IsOpenRouter(model config.ModelConfig) bool {
+	return Provider(model) == ProviderOpenRouter
+}
+
 // EndpointType determines which Zen endpoint format to use.
 type EndpointType int
 
@@ -155,6 +161,19 @@ func isResponsesModel(modelID string) bool {
 // getEndpoint returns the appropriate endpoint config for a model.
 func (c *OpenCodeClient) getEndpoint(modelID string, modelConfig config.ModelConfig) endpointConfig {
 	cfg := c.atomic.Get()
+
+	// OpenRouter routes through either the Anthropic Skin (for native-Anthropic
+	// models) or the OpenAI Chat Completions endpoint (for OpenAI-format models
+	// like GLM/Kimi/Qwen). Both use a separate API key pool.
+	if IsOpenRouter(modelConfig) {
+		or := cfg.OpenRouter
+		apiKey := c.nextAPIKey(or.EffectiveAPIKeys())
+		if IsAnthropicModel(modelID) {
+			return endpointConfig{BaseURL: or.AnthropicBaseURL, APIKey: apiKey}
+		}
+		return endpointConfig{BaseURL: or.BaseURL, APIKey: apiKey}
+	}
+
 	apiKey := c.nextAPIKey(cfg.EffectiveAPIKeys())
 
 	if IsZen(modelConfig) {
@@ -284,13 +303,19 @@ func (c *OpenCodeClient) SendAnthropicRequest(
 	modelConfig config.ModelConfig,
 ) (*http.Response, error) {
 	cfg := c.atomic.Get()
-	apiKey := c.nextAPIKey(cfg.EffectiveAPIKeys())
 
 	var baseURL string
-	if IsZen(modelConfig) {
+	var apiKey string
+	switch {
+	case IsZen(modelConfig):
 		baseURL = cfg.OpenCodeZen.AnthropicBaseURL
-	} else {
+		apiKey = c.nextAPIKey(cfg.EffectiveAPIKeys())
+	case IsOpenRouter(modelConfig):
+		baseURL = cfg.OpenRouter.AnthropicBaseURL
+		apiKey = c.nextAPIKey(cfg.OpenRouter.EffectiveAPIKeys())
+	default:
 		baseURL = cfg.OpenCodeGo.AnthropicBaseURL
+		apiKey = c.nextAPIKey(cfg.EffectiveAPIKeys())
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader(body))

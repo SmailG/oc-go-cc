@@ -1,0 +1,20 @@
+{
+  "api_key": "${OC_GO_CC_API_KEY}",
+  "host": "127.0.0.1",
+  "port": 3456,
+  "hot_reload": false,
+  "prefer_capability": false,
+  "enable_streaming_scenario_routing": false,
+  "respect_requested_model": false,
+  "routing_profile": "openrouter",
+  "openrouter": {
+    "api_key": "${OC_GO_CC_OPENROUTER_API_KEY}",
+    "base_url": "https://openrouter.ai/api/v1/chat/completions",
+    "anthropic_base_url": "https://openrouter.ai/api/v1/messages",
+    "timeout_ms": 300000
+  },
+  "logging": {
+    "level": "info",
+    "requests": true
+  }
+}

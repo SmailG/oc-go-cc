@@ -54,7 +54,7 @@ The proxy transforms OpenAI SSE to Anthropic SSE in real-time. If streaming appe
 
 This log means **Claude closed the HTTP connection** while the proxy was still streaming — usually a symptom, not the root cause.
 
-Common cause: a large request (long context, many tools) where the upstream model takes several seconds before the first token. Claude Code times out if it does not receive Anthropic-format SSE events (`message_start`, etc.) within ~6 seconds. Comment-only keepalives are not enough.
+Common cause: a large request (long context, many tools) where the upstream model takes several seconds before the first token. Claude Code times out if it does not receive Anthropic-format SSE events (`message_start`, `content_block_*`, `text_delta`, etc.) within ~6–10 seconds. Comment-only keepalives and `ping` alone are not enough — the proxy must emit **text** `text_delta` keepalives on a placeholder block until it forwards the first real content event (not merely when upstream connects; GLM-class models often connect then think silently for several seconds).
 
 Fix: rebuild and restart the proxy so it sends `message_start` immediately after opening the stream, before waiting on upstream:
 

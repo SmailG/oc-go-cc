@@ -291,6 +291,15 @@ func TestDefaults(t *testing.T) {
 	if cfg.OpenCodeZen.TimeoutMs != defaultTimeoutMs {
 		t.Errorf("OpenCodeZen.TimeoutMs = %d, want %d", cfg.OpenCodeZen.TimeoutMs, defaultTimeoutMs)
 	}
+	if cfg.OpenRouter.AnthropicBaseURL != defaultOpenRouterAnthropicBaseURL {
+		t.Errorf("OpenRouter.AnthropicBaseURL = %q, want %q", cfg.OpenRouter.AnthropicBaseURL, defaultOpenRouterAnthropicBaseURL)
+	}
+	if cfg.OpenRouter.BaseURL != defaultOpenRouterBaseURL {
+		t.Errorf("OpenRouter.BaseURL = %q, want %q", cfg.OpenRouter.BaseURL, defaultOpenRouterBaseURL)
+	}
+	if cfg.OpenRouter.TimeoutMs != defaultTimeoutMs {
+		t.Errorf("OpenRouter.TimeoutMs = %d, want %d", cfg.OpenRouter.TimeoutMs, defaultTimeoutMs)
+	}
 	if cfg.Logging.Level != defaultLogLevel {
 		t.Errorf("LogLevel = %q, want %q", cfg.Logging.Level, defaultLogLevel)
 	}
@@ -397,6 +406,51 @@ func TestValidateModelOverrides_AllValidProviders(t *testing.T) {
 	}
 	if err := validate(cfg); err != nil {
 		t.Errorf("expected no validation error, got %v", err)
+	}
+}
+
+func TestValidateRoutingProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile RoutingProfile
+		wantErr bool
+	}{
+		{name: "empty profile is allowed", profile: "", wantErr: false},
+		{name: "openrouter profile is allowed", profile: RoutingProfile("openrouter"), wantErr: false},
+		{name: "unknown profile is rejected", profile: RoutingProfile("bogus"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{APIKey: "test", RoutingProfile: tt.profile}
+			err := validate(cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validate() err = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRoutingProfileEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	cfgJSON := `{"api_key": "test-key"}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	_ = os.Setenv("OC_GO_CC_CONFIG", cfgPath)
+	_ = os.Setenv("OC_GO_CC_ROUTING_PROFILE", "openrouter")
+	t.Cleanup(func() {
+		_ = os.Unsetenv("OC_GO_CC_CONFIG")
+		_ = os.Unsetenv("OC_GO_CC_ROUTING_PROFILE")
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RoutingProfile != RoutingProfile("openrouter") {
+		t.Errorf("RoutingProfile = %q, want %q", cfg.RoutingProfile, "openrouter")
 	}
 }
 

@@ -46,10 +46,16 @@ type MessagesHandler struct {
 // causes Claude Code to disconnect).
 type responseWriter struct {
 	http.ResponseWriter
-	wroteHeader        bool
-	mu                 sync.Mutex
-	textKeepaliveIndex int // >=0 while placeholder text block is open (pre-upstream); -1 otherwise
+	wroteHeader            bool
+	mu                     sync.Mutex
+	keepaliveIndex         int // active block index for gap keepalives; -1 = ping only
+	keepaliveMode          transformer.KeepaliveMode
+	preambleKeepaliveIndex int // open placeholder text block for TTFT / fallback; -1 if closed
+	lastContentWrite       time.Time
+	inKeepalive            bool
 }
+
+const streamKeepaliveGap = 300 * time.Millisecond
 
 func (w *responseWriter) WriteHeader(code int) {
 	w.mu.Lock()
@@ -63,38 +69,138 @@ func (w *responseWriter) WriteHeader(code int) {
 func (w *responseWriter) Write(b []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.writeUnlocked(b)
+}
+
+func (w *responseWriter) writeUnlocked(b []byte) (int, error) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
 		w.ResponseWriter.WriteHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *responseWriter) keepaliveIndex() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.textKeepaliveIndex
-}
-
-func (w *responseWriter) setKeepaliveIndex(idx int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.textKeepaliveIndex = idx
-}
-
-// clearTextKeepaliveOnRead stops TTFT text keepalives once upstream sends data.
-type clearTextKeepaliveOnRead struct {
-	io.ReadCloser
-	clear func()
-	once  sync.Once
-}
-
-func (c *clearTextKeepaliveOnRead) Read(p []byte) (int, error) {
-	n, err := c.ReadCloser.Read(p)
-	if n > 0 {
-		c.once.Do(c.clear)
+	n, err := w.ResponseWriter.Write(b)
+	if err == nil && !w.inKeepalive {
+		w.lastContentWrite = time.Now()
 	}
 	return n, err
+}
+
+func (w *responseWriter) keepaliveState() (idx int, mode transformer.KeepaliveMode, preambleIdx int, idle time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.keepaliveIndex, w.keepaliveMode, w.preambleKeepaliveIndex, time.Since(w.lastContentWrite)
+}
+
+func (w *responseWriter) SetStreamKeepalive(index int, mode transformer.KeepaliveMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.keepaliveIndex = index
+	w.keepaliveMode = mode
+}
+
+func (w *responseWriter) SetPreambleKeepaliveIndex(index int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.preambleKeepaliveIndex = index
+}
+
+func (w *responseWriter) NoteStreamContentWrite() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastContentWrite = time.Now()
+}
+
+func (w *responseWriter) emitKeepaliveAt(idx int, mode transformer.KeepaliveMode) error {
+	idxCopy := idx
+	var event types.MessageEvent
+	switch mode {
+	case transformer.KeepaliveText:
+		event = types.MessageEvent{
+			Type:  "content_block_delta",
+			Index: &idxCopy,
+			Delta: &types.Delta{Type: "text_delta", Text: "\u200b"},
+		}
+	case transformer.KeepaliveThinking:
+		// thinking_delta keepalives do not reset Claude Code's ~6s inactivity timer.
+		event = types.MessageEvent{
+			Type:  "content_block_delta",
+			Index: &idxCopy,
+			Delta: &types.Delta{Type: "text_delta", Text: "\u200b"},
+		}
+	case transformer.KeepaliveToolInput:
+		event = types.MessageEvent{
+			Type:  "content_block_delta",
+			Index: &idxCopy,
+			Delta: &types.Delta{Type: "input_json_delta", PartialJSON: " "},
+		}
+	default:
+		return nil
+	}
+	if err := transformer.WriteSSEEventUnlocked(w.ResponseWriter, event); err != nil {
+		return err
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
+func (w *responseWriter) emitKeepalive() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	idx := w.keepaliveIndex
+	mode := w.keepaliveMode
+	if idx < 0 {
+		idx = w.preambleKeepaliveIndex
+		mode = transformer.KeepaliveText
+	}
+	if idx < 0 || time.Since(w.lastContentWrite) < streamKeepaliveGap {
+		return nil
+	}
+
+	w.inKeepalive = true
+	defer func() { w.inKeepalive = false }()
+	return w.emitKeepaliveAt(idx, mode)
+}
+
+// lockedSSEWriter serializes ProxyStream SSE writes with the heartbeat goroutine.
+type lockedSSEWriter struct {
+	parent *responseWriter
+}
+
+func (l *lockedSSEWriter) Header() http.Header { return l.parent.ResponseWriter.Header() }
+
+func (l *lockedSSEWriter) WriteHeader(code int) { l.parent.WriteHeader(code) }
+
+func (l *lockedSSEWriter) Write(b []byte) (int, error) {
+	l.parent.mu.Lock()
+	defer l.parent.mu.Unlock()
+	return l.parent.writeUnlocked(b)
+}
+
+func (l *lockedSSEWriter) Flush() {
+	l.parent.mu.Lock()
+	defer l.parent.mu.Unlock()
+	if f, ok := l.parent.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (l *lockedSSEWriter) SetStreamKeepalive(index int, mode transformer.KeepaliveMode) {
+	l.parent.SetStreamKeepalive(index, mode)
+}
+
+func (l *lockedSSEWriter) SetPreambleKeepaliveIndex(index int) {
+	l.parent.SetPreambleKeepaliveIndex(index)
+}
+
+func (l *lockedSSEWriter) NoteStreamContentWrite() {
+	l.parent.NoteStreamContentWrite()
+}
+
+// keepaliveActivityFor is retained for StreamActivity wiring; gap keepalives no longer stop at first content.
+func keepaliveActivityFor(_ http.ResponseWriter) *transformer.StreamActivity {
+	return nil
 }
 
 // Flush implements http.Flusher for SSE streaming support.
@@ -330,7 +436,9 @@ func ensureStreamTextPlaceholder(rw *responseWriter, preamble *transformer.Strea
 		return err
 	}
 	preamble.TextPlaceholderIndex = idx
-	rw.setKeepaliveIndex(idx)
+	rw.SetStreamKeepalive(idx, transformer.KeepaliveText)
+	rw.SetPreambleKeepaliveIndex(idx)
+	rw.NoteStreamContentWrite()
 	return nil
 }
 
@@ -346,7 +454,12 @@ func (h *MessagesHandler) handleStreaming(
 	clientCtx := r.Context()
 	clientModel := anthropicReq.Model
 
-	rw := &responseWriter{ResponseWriter: w, textKeepaliveIndex: -1}
+	rw := &responseWriter{
+		ResponseWriter:         w,
+		keepaliveIndex:         -1,
+		preambleKeepaliveIndex: -1,
+		lastContentWrite:       time.Now(),
+	}
 
 	// Set SSE headers immediately so Claude Code knows the stream is alive.
 	// Use rw (not the bare ResponseWriter) so headers and flush stay consistent
@@ -363,7 +476,7 @@ func (h *MessagesHandler) handleStreaming(
 	var finished int32
 	heartbeatDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
@@ -373,11 +486,9 @@ func (h *MessagesHandler) handleStreaming(
 					return
 				}
 				var err error
-				idx := rw.keepaliveIndex()
-				if idx >= 0 {
-					err = transformer.WriteTextKeepalive(rw, idx)
-				} else {
-					err = transformer.WritePing(rw)
+				idx, _, preambleIdx, idle := rw.keepaliveState()
+				if idle >= streamKeepaliveGap && (idx >= 0 || preambleIdx >= 0) {
+					err = rw.emitKeepalive()
 				}
 				if err != nil {
 					return
@@ -419,7 +530,7 @@ func (h *MessagesHandler) handleStreaming(
 
 		h.logger.Info("attempting streaming model", "model", model.ModelID, "provider", model.Provider)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(clientCtx, 2*time.Minute)
 
 		// Zen models use their own endpoint classification
 		if client.IsZen(model) {
@@ -566,12 +677,9 @@ func (h *MessagesHandler) handleStreaming(
 		}
 		logger.Info("upstream stream connected", "model", model.ModelID, "upstream_connect", upstreamConnect)
 
-		streamBody = &clearTextKeepaliveOnRead{
-			ReadCloser: streamBody,
-			clear:      func() { rw.setKeepaliveIndex(-1) },
-		}
-
-		if err := h.streamHandler.ProxyStream(rw, streamBody, clientModel, clientCtx, streamPreamble); err != nil {
+		activity := keepaliveActivityFor(rw)
+		streamW := &lockedSSEWriter{parent: rw}
+		if err := h.streamHandler.ProxyStream(streamW, streamBody, clientModel, clientCtx, streamPreamble, activity); err != nil {
 			_ = streamBody.Close()
 			cancel()
 			if err == transformer.ErrClientDisconnected {
@@ -591,7 +699,7 @@ func (h *MessagesHandler) handleStreaming(
 
 		_ = streamBody.Close()
 		cancel()
-		rw.setKeepaliveIndex(-1)
+		rw.SetStreamKeepalive(-1, transformer.KeepaliveNone)
 		latency := time.Since(streamStart)
 		h.metrics.RecordSuccess(model.ModelID, latency)
 		logger.Info("streaming completed", "model", model.ModelID, "latency", latency)
@@ -626,14 +734,8 @@ func (h *MessagesHandler) handleResponsesStreaming(
 		return err
 	}
 
-	if rw, ok := w.(*responseWriter); ok {
-		streamBody = &clearTextKeepaliveOnRead{
-			ReadCloser: streamBody,
-			clear:      func() { rw.setKeepaliveIndex(-1) },
-		}
-	}
-
-	if err := h.streamHandler.ProxyResponsesStream(w, streamBody, clientModel, clientCtx, preamble); err != nil {
+	activity := keepaliveActivityFor(w)
+	if err := h.streamHandler.ProxyResponsesStream(w, streamBody, clientModel, clientCtx, preamble, activity); err != nil {
 		_ = streamBody.Close()
 		return err
 	}
@@ -662,14 +764,8 @@ func (h *MessagesHandler) handleGeminiStreaming(
 		return err
 	}
 
-	if rw, ok := w.(*responseWriter); ok {
-		streamBody = &clearTextKeepaliveOnRead{
-			ReadCloser: streamBody,
-			clear:      func() { rw.setKeepaliveIndex(-1) },
-		}
-	}
-
-	if err := h.streamHandler.ProxyGeminiStream(w, streamBody, clientModel, clientCtx, preamble); err != nil {
+	activity := keepaliveActivityFor(w)
+	if err := h.streamHandler.ProxyGeminiStream(w, streamBody, clientModel, clientCtx, preamble, activity); err != nil {
 		_ = streamBody.Close()
 		return err
 	}
@@ -718,15 +814,8 @@ func (h *MessagesHandler) handleAnthropicStreaming(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body := resp.Body
-	if rw, ok := w.(*responseWriter); ok {
-		body = &clearTextKeepaliveOnRead{
-			ReadCloser: resp.Body,
-			clear:      func() { rw.setKeepaliveIndex(-1) },
-		}
-	}
-
-	if err := transformer.CopyAnthropicSSE(w, body, preamble.MessageStartSent); err != nil {
+	activity := keepaliveActivityFor(w)
+	if err := transformer.CopyAnthropicSSE(w, resp.Body, preamble.MessageStartSent, activity); err != nil {
 		if ctx.Err() == context.Canceled {
 			return transformer.ErrClientDisconnected
 		}

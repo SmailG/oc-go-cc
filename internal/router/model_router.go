@@ -65,31 +65,66 @@ func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, toolCount
 		return result, nil
 	}
 
-	// Otherwise, use scenario-based routing
-	result := DetectScenario(messages, tokenCount, toolCount, cfg)
+	// Apply built-in routing profile (e.g. "openrouter"). When a profile is
+	// active, scenario detection (which reads the long_context threshold from
+	// the user config) must see the profile's model set, so we synthesize a
+	// cfg with the profile's models merged in for detection purposes only.
+	detectCfg := cfg
+	if cfg.RoutingProfile != "" {
+		detectCfg = r.applyProfileToConfig(cfg)
+	}
+
+	// Use scenario-based routing
+	result := DetectScenario(messages, tokenCount, toolCount, detectCfg)
+
+	models, fallbacks := r.resolveProfile(cfg)
 
 	// Get primary model for scenario
-	primary, ok := cfg.Models[string(result.Scenario)]
+	primary, ok := models[string(result.Scenario)]
 	if !ok {
 		// Fall back to default if scenario model not configured
-		primary, ok = cfg.Models["default"]
+		primary, ok = models["default"]
 		if !ok {
 			return RouteResult{}, fmt.Errorf("no default model configured")
 		}
 	}
 
 	// Get fallbacks for scenario
-	fallbacks := cfg.Fallbacks[string(result.Scenario)]
-	if len(fallbacks) == 0 {
+	scenarioFallbacks := fallbacks[string(result.Scenario)]
+	if len(scenarioFallbacks) == 0 {
 		// Fall back to default fallbacks
-		fallbacks = cfg.Fallbacks["default"]
+		scenarioFallbacks = fallbacks["default"]
 	}
 
 	return RouteResult{
 		Primary:   primary,
-		Fallbacks: fallbacks,
+		Fallbacks: scenarioFallbacks,
 		Scenario:  result.Scenario,
 	}, nil
+}
+
+// resolveProfile returns the (models, fallbacks) maps to use for the active
+// routing profile. When a routing_profile is set, the built-in profile is
+// used; otherwise the configured maps are returned unchanged.
+func (r *ModelRouter) resolveProfile(cfg *config.Config) (map[string]config.ModelConfig, map[string][]config.ModelConfig) {
+	switch cfg.RoutingProfile {
+	case config.RoutingProfileOpenRouter:
+		return OpenRouterProfile()
+	}
+	return cfg.Models, cfg.Fallbacks
+}
+
+// applyProfileToConfig returns a shallow copy of cfg with Models and Fallbacks
+// replaced by the active profile's maps. Scenario detection reads cfg.Models
+// (e.g. for the long_context threshold), so detection must see the profile's
+// values; the original cfg is left untouched so user-configured values remain
+// available for explicit lookups.
+func (r *ModelRouter) applyProfileToConfig(cfg *config.Config) *config.Config {
+	profileModels, profileFallbacks := r.resolveProfile(cfg)
+	clone := *cfg
+	clone.Models = profileModels
+	clone.Fallbacks = profileFallbacks
+	return &clone
 }
 
 // IsStreamingScenarioRoutingEnabled returns whether streaming requests should use

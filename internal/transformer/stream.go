@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"oc-go-cc/pkg/types"
@@ -18,6 +20,180 @@ import (
 
 // ErrClientDisconnected is returned when the client disconnects during streaming.
 var ErrClientDisconnected = fmt.Errorf("client disconnected")
+
+// StreamActivity fires a one-shot callback when the proxy emits the first real
+// Anthropic content event to the client (not preamble/keepalive heartbeats).
+type StreamActivity struct {
+	once sync.Once
+	fn   func()
+}
+
+// NewStreamActivity creates a callback hook for first downstream stream content.
+func NewStreamActivity(fn func()) *StreamActivity {
+	return &StreamActivity{fn: fn}
+}
+
+func (a *StreamActivity) fire() {
+	if a == nil || a.fn == nil {
+		return
+	}
+	a.once.Do(a.fn)
+}
+
+// placeholderKeepaliveState keeps the preamble text block open (and text_delta
+// keepalives running) while upstream streams reasoning before any user-visible output.
+type placeholderKeepaliveState struct {
+	idx          int
+	open         bool
+	reasoningBuf strings.Builder
+}
+
+func newPlaceholderKeepaliveState(preamble StreamPreamble) placeholderKeepaliveState {
+	if !preamble.MessageStartSent || preamble.TextPlaceholderIndex < 0 {
+		return placeholderKeepaliveState{idx: -1}
+	}
+	return placeholderKeepaliveState{idx: preamble.TextPlaceholderIndex, open: true}
+}
+
+func (p *placeholderKeepaliveState) active() bool {
+	return p.open && p.idx >= 0
+}
+
+// releaseForText ends TTFT keepalives but keeps the preamble text block open for reuse.
+func (p *placeholderKeepaliveState) releaseForText(contentIndex *int, contentStarted *bool) bool {
+	if !p.active() || p.reasoningBuf.Len() > 0 {
+		return false
+	}
+	p.open = false
+	*contentIndex = p.idx
+	*contentStarted = true
+	return true
+}
+
+func (h *StreamHandler) closePlaceholderAndFlushReasoning(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	p *placeholderKeepaliveState,
+	contentIndex *int,
+	contentStarted *bool,
+	reasoningStarted *bool,
+) error {
+	if !p.active() {
+		return nil
+	}
+
+	idx := p.idx
+	if err := writeContentBlockStop(w, idx); err != nil {
+		return ErrClientDisconnected
+	}
+	p.open = false
+	*contentStarted = false
+	setPreambleKeepaliveIndex(w, -1)
+
+	if p.reasoningBuf.Len() > 0 {
+		*contentIndex = p.idx + 1
+		*reasoningStarted = true
+		startEvent := types.MessageEvent{
+			Type:         "content_block_start",
+			Index:        contentIndex,
+			ContentBlock: &types.ContentBlock{Type: "thinking", Thinking: ""},
+		}
+		if err := writeSSEEvent(w, startEvent); err != nil {
+			return ErrClientDisconnected
+		}
+		delta := types.Delta{
+			Type:     "thinking_delta",
+			Thinking: p.reasoningBuf.String(),
+		}
+		setStreamKeepalive(w, *contentIndex, KeepaliveThinking)
+		event := types.MessageEvent{
+			Type:  "content_block_delta",
+			Index: contentIndex,
+			Delta: &delta,
+		}
+		if err := writeSSEEvent(w, event); err != nil {
+			return ErrClientDisconnected
+		}
+		p.reasoningBuf.Reset()
+		if err := writeContentBlockStop(w, *contentIndex); err != nil {
+			return ErrClientDisconnected
+		}
+		*reasoningStarted = false
+		(*contentIndex)++
+	} else {
+		*contentIndex = p.idx + 1
+	}
+	flusher.Flush()
+	return nil
+}
+
+// closePlaceholderForToolTransition ends the preamble text block without emitting
+// thinking SSE. thinking_delta keepalives do not reset Claude Code's inactivity
+// timer; on tool-only turns we go straight to tool_use after the placeholder.
+func (h *StreamHandler) closePlaceholderForToolTransition(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	p *placeholderKeepaliveState,
+	contentIndex *int,
+	contentStarted *bool,
+) error {
+	if !p.active() {
+		return nil
+	}
+	idx := p.idx
+	if err := writeContentBlockStop(w, idx); err != nil {
+		return ErrClientDisconnected
+	}
+	p.open = false
+	p.reasoningBuf.Reset()
+	*contentStarted = false
+	setPreambleKeepaliveIndex(w, -1)
+	*contentIndex = p.idx + 1
+	flusher.Flush()
+	return nil
+}
+
+// StreamKeepalive is implemented by the streaming responseWriter so the
+// transformer can target gap-based keepalives on the active content block.
+type StreamKeepalive interface {
+	SetStreamKeepalive(index int, mode KeepaliveMode)
+	SetPreambleKeepaliveIndex(index int)
+	NoteStreamContentWrite()
+}
+
+// KeepaliveMode selects which Anthropic delta type to emit during idle gaps.
+type KeepaliveMode int
+
+const (
+	KeepaliveNone KeepaliveMode = iota
+	KeepaliveText
+	KeepaliveThinking
+	KeepaliveToolInput
+)
+
+func setStreamKeepalive(w http.ResponseWriter, index int, mode KeepaliveMode) {
+	if sk, ok := w.(StreamKeepalive); ok {
+		sk.SetStreamKeepalive(index, mode)
+	}
+}
+
+func setPreambleKeepaliveIndex(w http.ResponseWriter, index int) {
+	if sk, ok := w.(StreamKeepalive); ok {
+		sk.SetPreambleKeepaliveIndex(index)
+	}
+}
+
+func writeContentBlockStop(w http.ResponseWriter, idx int) error {
+	setStreamKeepalive(w, -1, KeepaliveNone)
+	stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
+	return writeSSEEvent(w, stopEvent)
+}
+
+func noteStreamContentWrite(w http.ResponseWriter) {
+	if sk, ok := w.(StreamKeepalive); ok {
+		sk.NoteStreamContentWrite()
+	}
+}
 
 // StreamHandler handles streaming SSE transformation from OpenAI to Anthropic format.
 type StreamHandler struct {
@@ -103,12 +279,13 @@ func WritePing(w http.ResponseWriter) error {
 }
 
 // WriteTextKeepalive emits a minimal text_delta on an open text block (TTFT keepalive).
+// Uses zero-width space so gap keepalives do not append visible characters.
 func WriteTextKeepalive(w http.ResponseWriter, index int) error {
 	idx := index
 	event := types.MessageEvent{
 		Type:  "content_block_delta",
 		Index: &idx,
-		Delta: &types.Delta{Type: "text_delta", Text: " "},
+		Delta: &types.Delta{Type: "text_delta", Text: "\u200b"},
 	}
 	if err := writeSSEEvent(w, event); err != nil {
 		return ErrClientDisconnected
@@ -117,6 +294,75 @@ func WriteTextKeepalive(w http.ResponseWriter, index int) error {
 		flusher.Flush()
 	}
 	return nil
+}
+
+// WriteThinkingKeepalive emits a minimal thinking_delta during idle gaps on a thinking block.
+func WriteThinkingKeepalive(w http.ResponseWriter, index int) error {
+	idx := index
+	event := types.MessageEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.Delta{Type: "thinking_delta", Thinking: "\u200b"},
+	}
+	if err := writeSSEEvent(w, event); err != nil {
+		return ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+// WriteToolInputKeepalive emits a minimal input_json_delta during idle gaps on a tool_use block.
+func WriteToolInputKeepalive(w http.ResponseWriter, index int) error {
+	idx := index
+	event := types.MessageEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.Delta{Type: "input_json_delta", PartialJSON: " "},
+	}
+	if err := writeSSEEvent(w, event); err != nil {
+		return ErrClientDisconnected
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
+// ctxReadCloser aborts blocked upstream reads when the client disconnects.
+type ctxReadCloser struct {
+	ctx context.Context
+	rc  io.ReadCloser
+}
+
+func newCtxReadCloser(ctx context.Context, rc io.ReadCloser) *ctxReadCloser {
+	return &ctxReadCloser{ctx: ctx, rc: rc}
+}
+
+func (c *ctxReadCloser) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	type readResult struct {
+		n   int
+		err error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		n, err := c.rc.Read(p)
+		ch <- readResult{n, err}
+	}()
+	select {
+	case <-c.ctx.Done():
+		return 0, c.ctx.Err()
+	case res := <-ch:
+		return res.n, res.err
+	}
+}
+
+func (c *ctxReadCloser) Close() error {
+	return c.rc.Close()
 }
 
 // ProxyStream takes an OpenAI streaming response and writes Anthropic-format SSE to the writer.
@@ -132,6 +378,7 @@ func (h *StreamHandler) ProxyStream(
 	clientModel string,
 	clientCtx context.Context,
 	preamble StreamPreamble,
+	activity *StreamActivity,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -144,18 +391,22 @@ func (h *StreamHandler) ProxyStream(
 		}
 	}
 
+	defer openaiResp.Close()
+	body := newCtxReadCloser(clientCtx, openaiResp)
+
 	// Read directly from response body without buffering.
 	// Use a tight loop with a line buffer - no bufio.Reader.
 	contentIndex := 0
 	var lineBuf bytes.Buffer
-	contentStarted := preamble.MessageStartSent && preamble.TextPlaceholderIndex >= 0
-	if contentStarted {
+	contentStarted := false
+	if preamble.TextPlaceholderIndex >= 0 {
 		contentIndex = preamble.TextPlaceholderIndex
 	}
 	reasoningStarted := false
 	stopSent := false
 	toolUseCount := 0
 	startedToolCalls := make(map[int]int) // maps OpenAI tool call index → Anthropic content block index
+	ph := newPlaceholderKeepaliveState(preamble)
 
 	// Read in larger chunks for efficiency, then parse lines
 	readBuf := make([]byte, 4096)
@@ -169,7 +420,7 @@ func (h *StreamHandler) ProxyStream(
 		}
 
 		// Read chunk from upstream
-		n, err := openaiResp.Read(readBuf)
+		n, err := body.Read(readBuf)
 		if n > 0 {
 			// Process bytes immediately
 			for i := 0; i < n; i++ {
@@ -179,7 +430,7 @@ func (h *StreamHandler) ProxyStream(
 					lineBuf.Reset()
 
 					// Process complete line
-					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel); err != nil {
+					if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel, activity, &ph); err != nil {
 						return err
 					}
 				} else {
@@ -192,14 +443,27 @@ func (h *StreamHandler) ProxyStream(
 			// Process any remaining data in buffer
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel); err != nil {
+				if err := h.processSSELine(w, flusher, line, &contentIndex, &contentStarted, &reasoningStarted, &stopSent, &toolUseCount, startedToolCalls, clientModel, activity, &ph); err != nil {
 					return err
 				}
 			}
 			break
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return ErrClientDisconnected
+			}
 			return fmt.Errorf("failed to read stream: %w", err)
+		}
+	}
+
+	if ph.active() {
+		if err := h.closePlaceholderAndFlushReasoning(w, flusher, &ph, &contentIndex, &contentStarted, &reasoningStarted); err != nil {
+			return err
+		}
+	} else if ph.reasoningBuf.Len() > 0 {
+		if err := h.closePlaceholderAndFlushReasoning(w, flusher, &ph, &contentIndex, &contentStarted, &reasoningStarted); err != nil {
+			return err
 		}
 	}
 
@@ -276,8 +540,7 @@ func closeActiveContentBlock(
 		return nil
 	}
 	idx := *contentIndex
-	stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
-	if err := writeSSEEvent(w, stopEvent); err != nil {
+	if err := writeContentBlockStop(w, idx); err != nil {
 		return ErrClientDisconnected
 	}
 	*contentIndex++
@@ -294,8 +557,7 @@ func closeOpenStreamBlocks(
 ) error {
 	if *reasoningStarted {
 		idx := *contentIndex
-		stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
-		if err := writeSSEEvent(w, stopEvent); err != nil {
+		if err := writeContentBlockStop(w, idx); err != nil {
 			return ErrClientDisconnected
 		}
 		*contentIndex++
@@ -303,8 +565,7 @@ func closeOpenStreamBlocks(
 	}
 	if *contentStarted {
 		idx := *contentIndex
-		stopEvent := types.MessageEvent{Type: "content_block_stop", Index: &idx}
-		if err := writeSSEEvent(w, stopEvent); err != nil {
+		if err := writeContentBlockStop(w, idx); err != nil {
 			return ErrClientDisconnected
 		}
 		*contentStarted = false
@@ -325,6 +586,8 @@ func (h *StreamHandler) processSSELine(
 	toolUseCount *int,
 	startedToolCalls map[int]int,
 	clientModel string,
+	activity *StreamActivity,
+	ph *placeholderKeepaliveState,
 ) error {
 	line = strings.TrimSpace(line)
 
@@ -365,14 +628,17 @@ func (h *StreamHandler) processSSELine(
 			if end != -1 {
 				content := data[start : start+end]
 				if content != "" {
+					_ = ph.releaseForText(contentIndex, contentStarted)
+					if ph.active() {
+						if err := h.closePlaceholderAndFlushReasoning(w, flusher, ph, contentIndex, contentStarted, reasoningStarted); err != nil {
+							return err
+						}
+					}
 					if !*contentStarted {
 						// If reasoning was already started, close it first
 						if *reasoningStarted {
-							stopEvent := types.MessageEvent{
-								Type:  "content_block_stop",
-								Index: contentIndex,
-							}
-							if err := writeSSEEvent(w, stopEvent); err != nil {
+							idx := *contentIndex
+							if err := writeContentBlockStop(w, idx); err != nil {
 								return ErrClientDisconnected
 							}
 							*contentIndex++
@@ -388,6 +654,7 @@ func (h *StreamHandler) processSSELine(
 						if err := writeSSEEvent(w, startEvent); err != nil {
 							return ErrClientDisconnected
 						}
+						setStreamKeepalive(w, *contentIndex, KeepaliveText)
 					}
 
 					// Send content_block_delta
@@ -404,6 +671,7 @@ func (h *StreamHandler) processSSELine(
 						return ErrClientDisconnected
 					}
 					flusher.Flush()
+					activity.fire()
 				}
 				return nil
 			}
@@ -430,6 +698,7 @@ func (h *StreamHandler) processSSELine(
 					return ErrClientDisconnected
 				}
 				flusher.Flush()
+				setStreamKeepalive(w, *contentIndex, KeepaliveThinking)
 			} else {
 				if err := h.sendUsageDelta(w, flusher, chunk.Usage); err != nil {
 					return err
@@ -444,55 +713,60 @@ func (h *StreamHandler) processSSELine(
 
 	// Handle reasoning content deltas
 	if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
-		if !*reasoningStarted {
-			// If text was already started, close it first
-			if *contentStarted {
-				stopEvent := types.MessageEvent{
-					Type:  "content_block_stop",
-					Index: contentIndex,
+		if ph.active() {
+			ph.reasoningBuf.WriteString(*choice.Delta.ReasoningContent)
+		} else {
+			if !*reasoningStarted {
+				// If text was already started, close it first
+				if *contentStarted {
+					idx := *contentIndex
+					if err := writeContentBlockStop(w, idx); err != nil {
+						return ErrClientDisconnected
+					}
+					*contentIndex++
+					*contentStarted = false
 				}
-				if err := writeSSEEvent(w, stopEvent); err != nil {
+				*reasoningStarted = true
+				startEvent := types.MessageEvent{
+					Type:         "content_block_start",
+					Index:        contentIndex,
+					ContentBlock: &types.ContentBlock{Type: "thinking", Thinking: ""},
+				}
+				if err := writeSSEEvent(w, startEvent); err != nil {
 					return ErrClientDisconnected
 				}
-				*contentIndex++
-				*contentStarted = false
+				setStreamKeepalive(w, *contentIndex, KeepaliveThinking)
 			}
-			*reasoningStarted = true
-			startEvent := types.MessageEvent{
-				Type:         "content_block_start",
-				Index:        contentIndex,
-				ContentBlock: &types.ContentBlock{Type: "thinking", Thinking: ""},
+
+			delta := types.Delta{
+				Type:     "thinking_delta",
+				Thinking: *choice.Delta.ReasoningContent,
 			}
-			if err := writeSSEEvent(w, startEvent); err != nil {
+			event := types.MessageEvent{
+				Type:  "content_block_delta",
+				Index: contentIndex,
+				Delta: &delta,
+			}
+			if err := writeSSEEvent(w, event); err != nil {
 				return ErrClientDisconnected
 			}
+			flusher.Flush()
 		}
-
-		delta := types.Delta{
-			Type:     "thinking_delta",
-			Thinking: *choice.Delta.ReasoningContent,
-		}
-		event := types.MessageEvent{
-			Type:  "content_block_delta",
-			Index: contentIndex,
-			Delta: &delta,
-		}
-		if err := writeSSEEvent(w, event); err != nil {
-			return ErrClientDisconnected
-		}
-		flusher.Flush()
 	}
 
 	// Handle text content deltas
 	if textContent := choice.Delta.ContentText(); textContent != "" {
+		_ = ph.releaseForText(contentIndex, contentStarted)
+		if ph.active() {
+			if err := h.closePlaceholderAndFlushReasoning(w, flusher, ph, contentIndex, contentStarted, reasoningStarted); err != nil {
+				return err
+			}
+		}
 		if !*contentStarted {
 			// If reasoning was already started, close it first
 			if *reasoningStarted {
-				stopEvent := types.MessageEvent{
-					Type:  "content_block_stop",
-					Index: contentIndex,
-				}
-				if err := writeSSEEvent(w, stopEvent); err != nil {
+				idx := *contentIndex
+				if err := writeContentBlockStop(w, idx); err != nil {
 					return ErrClientDisconnected
 				}
 				*contentIndex++
@@ -507,6 +781,7 @@ func (h *StreamHandler) processSSELine(
 			if err := writeSSEEvent(w, startEvent); err != nil {
 				return ErrClientDisconnected
 			}
+			setStreamKeepalive(w, *contentIndex, KeepaliveText)
 		}
 
 		delta := types.Delta{
@@ -522,6 +797,7 @@ func (h *StreamHandler) processSSELine(
 			return ErrClientDisconnected
 		}
 		flusher.Flush()
+		activity.fire()
 	}
 
 	// Handle tool call deltas.
@@ -530,6 +806,11 @@ func (h *StreamHandler) processSSELine(
 	// chunks carry only incremental arguments.  We must create exactly one
 	// content_block_start per tool call, then stream deltas for it.
 	if len(choice.Delta.ToolCalls) > 0 {
+		if ph.active() {
+			if err := h.closePlaceholderForToolTransition(w, flusher, ph, contentIndex, contentStarted); err != nil {
+				return err
+			}
+		}
 		for _, tc := range choice.Delta.ToolCalls {
 			oi := tc.Index // OpenAI tool_calls array index
 
@@ -542,11 +823,8 @@ func (h *StreamHandler) processSSELine(
 					continue
 				}
 				if *contentStarted || *reasoningStarted {
-					stopEvent := types.MessageEvent{
-						Type:  "content_block_stop",
-						Index: contentIndex,
-					}
-					if err := writeSSEEvent(w, stopEvent); err != nil {
+					idx := *contentIndex
+					if err := writeContentBlockStop(w, idx); err != nil {
 						return ErrClientDisconnected
 					}
 					*contentStarted = false
@@ -557,6 +835,7 @@ func (h *StreamHandler) processSSELine(
 				*toolUseCount++
 				blockIdx = *contentIndex
 				startedToolCalls[oi] = blockIdx
+				setStreamKeepalive(w, blockIdx, KeepaliveToolInput)
 
 				toolID := tc.ID
 				if toolID == "" {
@@ -575,6 +854,7 @@ func (h *StreamHandler) processSSELine(
 				if err := writeSSEEvent(w, startEvent); err != nil {
 					return ErrClientDisconnected
 				}
+				activity.fire()
 			}
 
 			// Send argument delta (if any) — whether new or continuation.
@@ -591,6 +871,7 @@ func (h *StreamHandler) processSSELine(
 				if err := writeSSEEvent(w, event); err != nil {
 					return ErrClientDisconnected
 				}
+				activity.fire()
 			}
 			flusher.Flush()
 		}
@@ -616,12 +897,7 @@ func (h *StreamHandler) processSSELine(
 				return entries[i].blockIdx < entries[j].blockIdx
 			})
 			for _, e := range entries {
-				idx := e.blockIdx
-				stopEvent := types.MessageEvent{
-					Type:  "content_block_stop",
-					Index: &idx,
-				}
-				if err := writeSSEEvent(w, stopEvent); err != nil {
+				if err := writeContentBlockStop(w, e.blockIdx); err != nil {
 					return ErrClientDisconnected
 				}
 			}
@@ -685,6 +961,11 @@ func usageInfoToAnthropic(usage *types.UsageInfo) *types.Usage {
 	}
 }
 
+// WriteSSEEventUnlocked writes one SSE frame without acquiring stream locks (caller holds them).
+func WriteSSEEventUnlocked(w http.ResponseWriter, event types.MessageEvent) error {
+	return writeSSEEvent(w, event)
+}
+
 // writeSSEEvent writes a single SSE event to the HTTP response writer.
 // Format: "event: <type>\ndata: <json>\n\n"
 func writeSSEEvent(w http.ResponseWriter, event types.MessageEvent) error {
@@ -704,7 +985,7 @@ func generateID() string {
 
 // CopyAnthropicSSE copies Anthropic-format SSE from upstream to the client. When
 // skipMessageStart is true, the first message_start event is dropped (already sent as preamble).
-func CopyAnthropicSSE(w io.Writer, r io.Reader, skipMessageStart bool) error {
+func CopyAnthropicSSE(w io.Writer, r io.Reader, skipMessageStart bool, activity *StreamActivity) error {
 	if !skipMessageStart {
 		_, err := io.Copy(w, r)
 		return err
@@ -722,6 +1003,9 @@ func CopyAnthropicSSE(w io.Writer, r io.Reader, skipMessageStart bool) error {
 		if skipMessageStart && isMessageStartSSEBlock(event) {
 			skipMessageStart = false
 			continue
+		}
+		if countsAsClientStreamActivity(event) {
+			activity.fire()
 		}
 		if _, err := w.Write(event); err != nil {
 			return err
@@ -751,6 +1035,33 @@ func readSSEEventBlock(br *bufio.Reader) ([]byte, error) {
 	}
 }
 
+func countsAsClientStreamActivity(block []byte) bool {
+	for _, line := range strings.Split(string(block), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var ev types.MessageEvent
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			continue
+		}
+		switch ev.Type {
+		case "content_block_start":
+			return ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use"
+		case "content_block_delta":
+			if ev.Delta == nil {
+				return false
+			}
+			switch ev.Delta.Type {
+			case "text_delta", "input_json_delta":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isMessageStartSSEBlock(block []byte) bool {
 	for _, line := range strings.Split(string(block), "\n") {
 		line = strings.TrimSpace(line)
@@ -773,6 +1084,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 	clientModel string,
 	clientCtx context.Context,
 	preamble StreamPreamble,
+	activity *StreamActivity,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -808,7 +1120,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 				if b == '\n' {
 					line := lineBuf.String()
 					lineBuf.Reset()
-					if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
+					if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel, activity); err != nil {
 						return err
 					}
 				} else {
@@ -820,7 +1132,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 		if err == io.EOF {
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
+				if err := h.processResponsesSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel, activity); err != nil {
 					return err
 				}
 			}
@@ -873,7 +1185,8 @@ func (h *StreamHandler) processResponsesSSELine(
 	contentIndex *int,
 	contentStarted *bool,
 	stopSent *bool,
-	originalModel string,
+	clientModel string,
+	activity *StreamActivity,
 ) error {
 	line = strings.TrimSpace(line)
 	if line == "" || !strings.HasPrefix(line, "data: ") {
@@ -916,6 +1229,7 @@ func (h *StreamHandler) processResponsesSSELine(
 			return ErrClientDisconnected
 		}
 		flusher.Flush()
+		activity.fire()
 	}
 
 	if chunk.Type == "response.completed" || chunk.Type == "response.done" {
@@ -945,6 +1259,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 	clientModel string,
 	clientCtx context.Context,
 	preamble StreamPreamble,
+	activity *StreamActivity,
 ) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -980,7 +1295,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 				if b == '\n' {
 					line := lineBuf.String()
 					lineBuf.Reset()
-					if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
+					if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel, activity); err != nil {
 						return err
 					}
 				} else {
@@ -992,7 +1307,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 		if err == io.EOF {
 			if lineBuf.Len() > 0 {
 				line := lineBuf.String()
-				if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel); err != nil {
+				if err := h.processGeminiSSELine(w, flusher, line, &contentIndex, &contentStarted, &stopSent, clientModel, activity); err != nil {
 					return err
 				}
 			}
@@ -1045,7 +1360,8 @@ func (h *StreamHandler) processGeminiSSELine(
 	contentIndex *int,
 	contentStarted *bool,
 	stopSent *bool,
-	originalModel string,
+	clientModel string,
+	activity *StreamActivity,
 ) error {
 	line = strings.TrimSpace(line)
 	if line == "" || !strings.HasPrefix(line, "data: ") {
@@ -1091,6 +1407,7 @@ func (h *StreamHandler) processGeminiSSELine(
 					return ErrClientDisconnected
 				}
 				flusher.Flush()
+				activity.fire()
 			}
 		}
 
