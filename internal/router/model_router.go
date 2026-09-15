@@ -344,6 +344,13 @@ func (r *ModelRouter) legacyUnknownModelConfig(cfg *config.Config, requestedMode
 // Route determines which model to use for a request.
 // If respect_requested_model is enabled and requestedModel is provided, it overrides scenario-based routing.
 func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requestedModel string) (RouteResult, error) {
+	return r.RouteWithTools(messages, tokenCount, 0, requestedModel)
+}
+
+// RouteWithTools is Route plus the request's tool count, which the messages do
+// not carry. A tool-heavy request routes to complex regardless of its text --
+// see toolHeavyThreshold.
+func (r *ModelRouter) RouteWithTools(messages []MessageContent, tokenCount, toolCount int, requestedModel string) (RouteResult, error) {
 	cfg := r.atomic.Get()
 	facts := AnalyzeRequestFacts(messages)
 
@@ -354,7 +361,7 @@ func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requested
 	}
 
 	// Otherwise, use scenario-based routing
-	result := DetectScenario(messages, tokenCount, cfg)
+	result := DetectScenarioWithTools(messages, tokenCount, toolCount, cfg)
 	scenarioKey := string(result.Scenario)
 	trigger := fmt.Sprintf("scenario=%s (%s)", result.Scenario, result.Reason)
 

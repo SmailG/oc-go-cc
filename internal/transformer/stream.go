@@ -84,7 +84,7 @@ func (h *StreamHandler) EmitMessageResponse(w http.ResponseWriter, resp *types.M
 		Type:    "message_start",
 		Message: resp,
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
+	if err := writeMessageStartOnce(w, msgStart); err != nil {
 		return ErrClientDisconnected
 	}
 	flusher.Flush()
@@ -228,7 +228,7 @@ func (h *StreamHandler) ProxyStream(
 			Model:   originalModel,
 		},
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
+	if err := writeMessageStartOnce(w, msgStart); err != nil {
 		return ErrClientDisconnected
 	}
 	flusher.Flush()
@@ -796,6 +796,12 @@ func generateID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+// GenerateID exposes the stream message-ID generator so a caller that emits
+// message_start before the stream proxies run produces ids of the same shape.
+func GenerateID() string {
+	return generateID()
+}
+
 // ProxyResponsesStream takes an OpenAI Responses streaming response and writes Anthropic-format SSE.
 // streamCtx is the per-model attempt context (carries streaming_timeout_ms); the caller should
 // wrap responsesResp with NewCtxReadCloser so the body read also respects the deadline.
@@ -824,7 +830,7 @@ func (h *StreamHandler) ProxyResponsesStream(
 			Model:   originalModel,
 		},
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
+	if err := writeMessageStartOnce(w, msgStart); err != nil {
 		return ErrClientDisconnected
 	}
 	flusher.Flush()
@@ -1159,7 +1165,7 @@ func (h *StreamHandler) ProxyGeminiStream(
 			Model:   originalModel,
 		},
 	}
-	if err := writeSSEEvent(w, msgStart); err != nil {
+	if err := writeMessageStartOnce(w, msgStart); err != nil {
 		return ErrClientDisconnected
 	}
 	flusher.Flush()
@@ -1339,4 +1345,36 @@ func (h *StreamHandler) processGeminiSSELine(
 	}
 
 	return nil
+}
+
+// MessageStartTracker lets a caller that has already emitted `message_start`
+// tell the stream proxies to skip their own.
+//
+// Claude Code drops a stream that goes ~6s without an Anthropic SSE event, and
+// SSE comment frames do not reset that timer. The handler therefore writes
+// message_start before it starts waiting on the upstream model, which means the
+// per-attempt message_start below would be a duplicate — and a second one mid
+// stream, after a model fallback, restarts the message as far as the client is
+// concerned.
+//
+// Implemented as a writer-side interface so the proxy signatures stay as
+// upstream has them: a writer that does not implement it behaves exactly as
+// before.
+type MessageStartTracker interface {
+	// MessageStartAlreadySent reports whether message_start is on the wire.
+	MessageStartAlreadySent() bool
+	// MarkMessageStartSent records that message_start has been written.
+	MarkMessageStartSent()
+}
+
+// writeMessageStartOnce emits msgStart unless the writer reports that a
+// message_start has already gone out, and records that it has.
+func writeMessageStartOnce(w http.ResponseWriter, msgStart types.MessageEvent) error {
+	if tracker, ok := w.(MessageStartTracker); ok {
+		if tracker.MessageStartAlreadySent() {
+			return nil
+		}
+		defer tracker.MarkMessageStartSent()
+	}
+	return writeSSEEvent(w, msgStart)
 }

@@ -358,3 +358,39 @@ func TestDetectScenario_ReasonsNameNoModels(t *testing.T) {
 		})
 	}
 }
+
+// A tool-heavy request must route to complex on its tool count alone, whatever
+// the prompt text says. Routing it to a fast model does not help: the latency
+// is in the size of the tool schema, not the model.
+func TestDetectScenarioWithTools_ToolHeavyRoutesToComplex(t *testing.T) {
+	// Deliberately trivial text — a "background"-looking prompt. Only the tool
+	// count should move it.
+	messages := []MessageContent{{Role: "user", Content: "list the files"}}
+	cfg := &config.Config{}
+
+	if got := DetectScenarioWithTools(messages, 100, toolHeavyThreshold-1, cfg); got.Scenario == ScenarioComplex {
+		t.Errorf("below threshold: scenario = %v, want anything but complex (reason: %s)", got.Scenario, got.Reason)
+	}
+
+	got := DetectScenarioWithTools(messages, 100, toolHeavyThreshold, cfg)
+	if got.Scenario != ScenarioComplex {
+		t.Errorf("at threshold: scenario = %v, want %v (reason: %s)", got.Scenario, ScenarioComplex, got.Reason)
+	}
+
+	// DetectScenario is the no-tool-count entry point and must be unaffected.
+	if plain := DetectScenario(messages, 100, cfg); plain.Scenario == ScenarioComplex {
+		t.Errorf("DetectScenario without a tool count = %v, want the text-based scenario", plain.Scenario)
+	}
+}
+
+// Long context still wins: a huge prompt is a context problem before it is a
+// tool problem, and the tool-heavy model may not have the window for it.
+func TestDetectScenarioWithTools_LongContextBeatsToolHeavy(t *testing.T) {
+	messages := []MessageContent{{Role: "user", Content: "list the files"}}
+	cfg := &config.Config{}
+
+	got := DetectScenarioWithTools(messages, getLongContextThreshold(cfg)+1, toolHeavyThreshold*10, cfg)
+	if got.Scenario != ScenarioLongContext {
+		t.Errorf("scenario = %v, want %v (reason: %s)", got.Scenario, ScenarioLongContext, got.Reason)
+	}
+}

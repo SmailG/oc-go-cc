@@ -149,7 +149,7 @@ func TestBuildModelChain_NoOverride_UsesScenarioRoute(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, result, err := h.buildModelChain("", nil, 100, false, 4096, false, false)
+	chain, result, err := h.buildModelChain("", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestBuildModelChain_Override_AppendsScenarioChainDeduped(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, result, err := h.buildModelChain("kimi-k2.6", nil, 100, false, 4096, false, false)
+	chain, result, err := h.buildModelChain("kimi-k2.6", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestBuildModelChain_FamilyOverride_MatchesVersionedID(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, result, err := h.buildModelChain("claude-opus-4-20250514", nil, 100, false, 4096, false, false)
+	chain, result, err := h.buildModelChain("claude-opus-4-20250514", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestBuildModelChain_ExactOverrideWinsOverFamily(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	_, result, err := h.buildModelChain("claude-opus-4-20250514", nil, 100, false, 4096, false, false)
+	_, result, err := h.buildModelChain("claude-opus-4-20250514", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestBuildModelChain_Override_AppendsUniqueScenarioModels(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, result, err := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, false)
+	chain, result, err := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestBuildModelChain_Override_NoMatchingFallbacksKey(t *testing.T) {
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, _, err := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, false)
+	chain, _, err := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestBuildModelChain_StreamingFlag_UsesStreamingRoute(t *testing.T) {
 	h := newTestMessagesHandler(t, cfg)
 
 	// Non-streaming: scenario is default
-	_, resultNonStream, _ := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, false)
+	_, resultNonStream, _ := h.buildModelChain("claude-sonnet-4.5", nil, 100, false, 4096, false, 0)
 	if resultNonStream.Scenario != router.ScenarioOverride {
 		t.Errorf("non-streaming scenario = %s, want %s", resultNonStream.Scenario, router.ScenarioOverride)
 	}
@@ -369,7 +369,7 @@ func TestBuildModelChain_StreamingFlag_UsesStreamingRoute(t *testing.T) {
 	// Streaming: override still wins, but the safety-net uses fast route.
 	// Chain: [claude-sonnet-4.5 (override), mimo-v2.5-pro (default fallback),
 	//         qwen3.6-plus (fast scenario primary), qwen3.5-plus (fast scenario fallback)]
-	chain, _, _ := h.buildModelChain("claude-sonnet-4.5", nil, 100, true, 4096, false, false)
+	chain, _, _ := h.buildModelChain("claude-sonnet-4.5", nil, 100, true, 4096, false, 0)
 	want := []string{"claude-sonnet-4.5", "mimo-v2.5-pro", "qwen3.6-plus", "qwen3.5-plus"}
 	if got := chainIDs(chain); !equalStrings(got, want) {
 		t.Errorf("streaming chain = %v, want %v (safety-net should use RouteForStreaming)", got, want)
@@ -393,7 +393,7 @@ func TestBuildModelChain_UnknownModel_FallsThroughToScenarioRoute(t *testing.T) 
 	}
 	h := newTestMessagesHandler(t, cfg)
 
-	chain, result, err := h.buildModelChain("completely-unknown", nil, 100, false, 4096, false, false)
+	chain, result, err := h.buildModelChain("completely-unknown", nil, 100, false, 4096, false, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1891,6 +1891,13 @@ func TestHandleStreaming_AnthropicRaw_NoKeepaliveInjection(t *testing.T) {
 	if strings.Contains(body, ":keepalive") {
 		t.Errorf("keepalive comment leaked into Anthropic raw stream output (concurrent write bug):\n%s", body)
 	}
+
+	// The raw Anthropic path forwards upstream bytes verbatim, so the handler's
+	// own preamble message_start must not add a second one — a client that sees
+	// two treats the stream as two messages.
+	if n := strings.Count(body, "event: message_start"); n != 1 {
+		t.Errorf("message_start count = %d, want 1 (duplicate preamble on raw passthrough):\n%s", n, body)
+	}
 }
 
 // newSessionPropagationHandler builds a fully-wired MessagesHandler (legacy
@@ -2221,5 +2228,127 @@ func TestHandleMessages_OpenCodeZen_OmitsSessionHeader(t *testing.T) {
 
 	if gotSession != "" {
 		t.Errorf("OpenCode Zen must not receive %s, got %q", core.OpenCodeSessionHeader, gotSession)
+	}
+}
+
+// preambleTestProvider streams an OpenAI-format SSE body (so the transform
+// path runs, not raw Anthropic passthrough) after an optional delay.
+type preambleTestProvider struct {
+	name  string
+	body  string
+	delay time.Duration
+}
+
+func (p *preambleTestProvider) Name() string { return p.name }
+func (p *preambleTestProvider) Capabilities() core.ProviderCapabilities {
+	return core.ProviderCapabilities{SupportsStreaming: true}
+}
+func (p *preambleTestProvider) ModelCapabilities(string) (core.ProviderCapabilities, bool) {
+	return core.ProviderCapabilities{SupportsStreaming: true}, true
+}
+func (p *preambleTestProvider) WireFormat(config.ModelConfig) core.WireFormat {
+	return core.WireFormatOpenAIChat
+}
+func (p *preambleTestProvider) Execute(context.Context, *core.NormalizedRequest, config.ModelConfig) (*core.ExecuteResult, error) {
+	return nil, fmt.Errorf("not used")
+}
+func (p *preambleTestProvider) Stream(context.Context, *core.NormalizedRequest, config.ModelConfig) (io.ReadCloser, error) {
+	time.Sleep(p.delay)
+	return io.NopCloser(strings.NewReader(p.body)), nil
+}
+func (p *preambleTestProvider) RoundTripName(model config.ModelConfig) string { return model.ModelID }
+func (p *preambleTestProvider) StreamIdleTimeout(config.ModelConfig) time.Duration {
+	return time.Minute
+}
+
+// The preamble exists so Claude Code sees an Anthropic event before upstream
+// TTFT elapses. It must be emitted exactly once: the per-attempt message_start
+// in the stream proxy has to be suppressed, or a fallback restarts the message
+// mid-stream as far as the client is concerned.
+func TestHandleStreaming_PreambleEmitsExactlyOneMessageStart(t *testing.T) {
+	cfg := &config.Config{
+		OpenCodeGo: config.OpenCodeGoConfig{TimeoutMs: 5000, StreamTimeoutMs: 5000},
+	}
+	atomicCfg := config.NewAtomicConfig(cfg, "/tmp/test-config.json")
+	registry := core.NewProviderRegistry()
+	_ = registry.Register(&preambleTestProvider{
+		name: "opencode-go",
+		body: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+	})
+
+	h := &MessagesHandler{
+		client:           client.NewOpenCodeClient(atomicCfg, nil),
+		providerRegistry: registry,
+		streamProxy:      NewStreamProxy(),
+		streamHandler:    transformer.NewStreamHandler(),
+		logger:           slog.Default(),
+		metrics:          metrics.New(),
+	}
+
+	anthropicReq := &types.MessageRequest{Model: "claude-sonnet-4-5", Stream: boolPtr(true)}
+	chain := []config.ModelConfig{{Provider: "opencode-go", ModelID: "deepseek-v4-flash"}}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleStreaming(rec, req, anthropicReq, &core.NormalizedRequest{Stream: true},
+		chain, json.RawMessage(`{}`), router.Scenario(""), "")
+
+	body := rec.Body.String()
+
+	if n := strings.Count(body, "event: message_start"); n != 1 {
+		t.Errorf("message_start count = %d, want 1:\n%s", n, body)
+	}
+	// The preamble must be the opening event, not emitted after the upstream
+	// answered — otherwise it does nothing for time-to-first-event.
+	if !strings.HasPrefix(strings.TrimLeft(body, "\n"), "event: message_start") {
+		t.Errorf("stream does not open with message_start:\n%s", body)
+	}
+	// It reports the model the client asked for, not the upstream fallback.
+	if !strings.Contains(body, `"model":"claude-sonnet-4-5"`) {
+		t.Errorf("preamble should carry the client-requested model:\n%s", body)
+	}
+}
+
+// WriteKeepalive must switch from an SSE comment to an Anthropic `ping` event
+// once message_start is on the wire: Claude Code's inactivity timer is reset by
+// events, not by comment frames.
+func TestResponseWriter_KeepaliveBecomesPingAfterMessageStart(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &responseWriter{ResponseWriter: rec}
+
+	if err := rw.WriteKeepalive(time.Second); err != nil {
+		t.Fatalf("WriteKeepalive() before message_start: %v", err)
+	}
+	if got := rec.Body.String(); got != ":keepalive\n\n" {
+		t.Errorf("before message_start = %q, want the comment frame", got)
+	}
+
+	rec.Body.Reset()
+	rw.MarkMessageStartSent()
+	if err := rw.WriteKeepalive(time.Second); err != nil {
+		t.Fatalf("WriteKeepalive() after message_start: %v", err)
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "event: ping") || !strings.Contains(got, `"type":"ping"`) {
+		t.Errorf("after message_start = %q, want an Anthropic ping event", got)
+	}
+}
+
+// A preamble must never set ssePayloadWritten: that flag means the stream is
+// committed to a model and permanently disables fallback.
+func TestResponseWriter_PreambleDoesNotCommitStream(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := &responseWriter{ResponseWriter: rec}
+
+	if err := rw.WritePreamble("event: ping\ndata: {}\n\n", time.Second); err != nil {
+		t.Fatalf("WritePreamble() error = %v", err)
+	}
+	if rw.ssePayloadWritten {
+		t.Error("ssePayloadWritten set by a preamble write — fallback would be disabled for every stream")
+	}
+
+	_, _ = rw.Write([]byte("event: content_block_delta\ndata: {}\n\n"))
+	if !rw.ssePayloadWritten {
+		t.Error("ssePayloadWritten not set by a real payload write")
 	}
 }

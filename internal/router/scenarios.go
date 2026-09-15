@@ -67,6 +67,23 @@ type RequestFacts struct {
 //
 // For streaming requests, consider using RouteForStreaming() to prefer faster models.
 func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Config) ScenarioResult {
+	return DetectScenarioWithTools(messages, tokenCount, 0, cfg)
+}
+
+// toolHeavyThreshold is the tool count at or above which a request is treated
+// as complex regardless of its text.
+//
+// A large tool schema dominates upstream time-to-first-token: the POST body is
+// huge before the model has read a word of the prompt. Routing such a request
+// to a "fast" model does not help — the latency is in the body, not the model —
+// and the fast model is the one least able to use the tools once it does
+// respond. Measured against Claude Code with 200+ tools, where the stream sat
+// on "Brewed for Ns" and then ended with no answer.
+const toolHeavyThreshold = 64
+
+// DetectScenarioWithTools is DetectScenario plus the request's tool count, which
+// is not derivable from the messages. Callers without it use DetectScenario.
+func DetectScenarioWithTools(messages []MessageContent, tokenCount, toolCount int, cfg *config.Config) ScenarioResult {
 	facts := AnalyzeRequestFacts(messages)
 	// 1. Check for long context first (most important)
 	threshold := getLongContextThreshold(cfg)
@@ -97,6 +114,15 @@ func DetectScenario(messages []MessageContent, tokenCount int, cfg *config.Confi
 			Scenario:   ScenarioVision,
 			TokenCount: tokenCount,
 			Reason:     "simple image request detected",
+		}
+	}
+
+	// 1b. Tool-heavy requests are complex by size, before any text heuristic.
+	if toolCount >= toolHeavyThreshold {
+		return ScenarioResult{
+			Scenario:   ScenarioComplex,
+			TokenCount: tokenCount,
+			Reason:     fmt.Sprintf("tool count %d at or above tool-heavy threshold %d", toolCount, toolHeavyThreshold),
 		}
 	}
 

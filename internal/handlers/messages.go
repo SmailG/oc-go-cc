@@ -61,6 +61,7 @@ type responseWriter struct {
 	mu                sync.Mutex
 	wroteHeader       bool
 	ssePayloadWritten bool
+	messageStartSent  bool
 	contentWritten    bool
 	firstContentAt    time.Time
 	usage             struct {
@@ -273,30 +274,120 @@ const (
 	claudeCodeSessionHeader = "x-claude-code-session-id"
 )
 
-// WriteKeepalive writes a keepalive comment frame (":keepalive\n\n") to the
-// response. Unlike Write, it does NOT set ssePayloadWritten — keepalives are
-// not real SSE events and should not block fallback logic on idle timeout.
+// MessageStartAlreadySent reports whether the opening message_start is on the
+// wire. Implements transformer.MessageStartTracker so the stream proxies skip
+// the one they would otherwise emit per attempt.
+func (w *responseWriter) MessageStartAlreadySent() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.messageStartSent
+}
+
+// MarkMessageStartSent records that message_start has been written.
+func (w *responseWriter) MarkMessageStartSent() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.messageStartSent = true
+}
+
+// WritePreamble writes raw SSE bytes under the keepalive write deadline
+// WITHOUT setting ssePayloadWritten. That flag means "this stream is committed
+// to a model" and permanently disables fallback (see the rw.ssePayloadWritten
+// guards in the streaming loop); a preamble is written before any model has
+// answered, so it must not commit the stream.
+func (w *responseWriter) WritePreamble(payload string, writeTimeout time.Duration) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writePreambleUnlocked(payload, writeTimeout)
+}
+
+func (w *responseWriter) writePreambleUnlocked(payload string, writeTimeout time.Duration) error {
+	controller := http.NewResponseController(w.ResponseWriter)
+
+	// The deadline is a guard against a stalled client, not a requirement:
+	// some writers (httptest.ResponseRecorder, wrappers that do not implement
+	// SetWriteDeadline) return ErrNotSupported. Treating that as fatal would
+	// abort every stream on those writers, so set it best-effort.
+	deadlineSet := controller.SetWriteDeadline(time.Now().Add(writeTimeout)) == nil
+
+	if _, err := io.WriteString(w.ResponseWriter, payload); err != nil {
+		return fmt.Errorf("write preamble: %w", err)
+	}
+	if err := controller.Flush(); err != nil {
+		return fmt.Errorf("flush preamble: %w", err)
+	}
+	if deadlineSet {
+		// Clear only what we set. On failure leave it in place so later writes
+		// fail instead of blocking on the same stalled client indefinitely.
+		_ = controller.SetWriteDeadline(time.Time{})
+	}
+	return nil
+}
+
+// WriteKeepalive writes a heartbeat frame to the response. Unlike Write, it does
+// NOT set ssePayloadWritten — keepalives are not real SSE events and should not
+// block fallback logic on idle timeout.
+//
+// Once message_start is on the wire it sends an Anthropic `ping` EVENT rather
+// than an SSE comment. Claude Code drops a stream after ~6s without an Anthropic
+// event, and a `:keepalive` comment does not reset that timer — so on a slow
+// upstream the comment frame keeps the socket warm while the client gives up
+// anyway. A ping before message_start would be out of order, so the comment
+// frame remains the fallback.
 func (w *responseWriter) WriteKeepalive(writeTimeout time.Duration) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	controller := http.NewResponseController(w.ResponseWriter)
-	if err := controller.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		return fmt.Errorf("set keepalive write deadline: %w", err)
+	frame := ":keepalive\n\n"
+	if w.messageStartSent {
+		frame = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
 	}
-	if _, err := io.WriteString(w.ResponseWriter, ":keepalive\n\n"); err != nil {
-		return fmt.Errorf("write keepalive: %w", err)
-	}
-	if err := controller.Flush(); err != nil {
-		return fmt.Errorf("flush keepalive: %w", err)
-	}
+	return w.writePreambleUnlocked(frame, writeTimeout)
+}
 
-	// Clear the heartbeat-specific deadline after a successful flush. On error,
-	// leave it in place so later response writes fail instead of blocking on the
-	// same stalled client indefinitely.
-	if err := controller.SetWriteDeadline(time.Time{}); err != nil {
-		return fmt.Errorf("clear keepalive write deadline: %w", err)
+// chainUsesRawAnthropic reports whether any model in the chain would be
+// streamed as raw Anthropic passthrough. A model whose provider is not in the
+// registry counts as raw: the conservative answer is the one that cannot
+// produce a duplicate message_start.
+func (h *MessagesHandler) chainUsesRawAnthropic(modelChain []config.ModelConfig) bool {
+	if h.providerRegistry == nil {
+		return true
 	}
+	for _, model := range modelChain {
+		prov, ok := h.providerRegistry.Get(client.Provider(model))
+		if !ok || prov.WireFormat(model) == core.WireFormatAnthropic {
+			return true
+		}
+	}
+	return false
+}
+
+// writeStreamPreamble emits the opening message_start and records it on rw so
+// the stream proxies suppress theirs.
+//
+// clientModel is the model the client asked for, not whichever fallback ends up
+// answering: the client is told what it requested, and which upstream model
+// served it stays an implementation detail. It also means the value is known
+// before any model has been attempted, which is the whole point.
+func (h *MessagesHandler) writeStreamPreamble(rw *responseWriter, clientModel string) error {
+	event := types.MessageEvent{
+		Type: "message_start",
+		Message: &types.MessageResponse{
+			ID:      "msg_" + transformer.GenerateID(),
+			Type:    "message",
+			Role:    "assistant",
+			Content: []types.ContentBlock{},
+			Model:   clientModel,
+		},
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal message_start: %w", err)
+	}
+	if err := rw.WritePreamble(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Type, data), keepaliveWriteTimeout); err != nil {
+		return err
+	}
+	rw.MarkMessageStartSent()
 	return nil
 }
 
@@ -506,8 +597,7 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	// Route to appropriate model and build fallback chain.
 	routeStart := time.Now()
 	facts := router.AnalyzeRequestFacts(routerMessages)
-	needsTools := len(anthropicReq.Tools) > 0
-	modelChain, routeResult, err := h.buildModelChain(anthropicReq.Model, routerMessages, tokenCount, isStreaming, anthropicReq.MaxTokens, facts.NeedsVision, needsTools)
+	modelChain, routeResult, err := h.buildModelChain(anthropicReq.Model, routerMessages, tokenCount, isStreaming, anthropicReq.MaxTokens, facts.NeedsVision, len(anthropicReq.Tools))
 	if err != nil {
 		status := http.StatusInternalServerError
 		message := "routing failed"
@@ -605,7 +695,7 @@ func (h *MessagesHandler) buildModelChain(
 	isStreaming bool,
 	requestedMaxTokens int,
 	needsVision bool,
-	needsTools bool,
+	toolCount int,
 ) ([]config.ModelConfig, router.RouteResult, error) {
 	var chain []config.ModelConfig
 	var result router.RouteResult
@@ -616,7 +706,7 @@ func (h *MessagesHandler) buildModelChain(
 			overrideResult, ok = h.modelRouter.RouteWithFamilyOverride(requestedModel)
 		}
 		if ok {
-			scenarioResult, err := h.routeOnce(routerMessages, tokenCount, "", isStreaming)
+			scenarioResult, err := h.routeOnce(routerMessages, tokenCount, toolCount, "", isStreaming)
 			if err != nil {
 				return overrideResult.GetModelChain(), overrideResult, err
 			}
@@ -627,14 +717,14 @@ func (h *MessagesHandler) buildModelChain(
 
 	if chain == nil {
 		var err error
-		result, err = h.routeOnce(routerMessages, tokenCount, requestedModel, isStreaming)
+		result, err = h.routeOnce(routerMessages, tokenCount, toolCount, requestedModel, isStreaming)
 		if err != nil {
 			return nil, result, err
 		}
 		chain = result.GetModelChain()
 	}
 
-	decision, err := router.FilterByCapacity(chain, tokenCount, requestedMaxTokens, needsVision, needsTools)
+	decision, err := router.FilterByCapacity(chain, tokenCount, requestedMaxTokens, needsVision, toolCount > 0)
 	if err != nil {
 		return nil, result, err
 	}
@@ -653,6 +743,7 @@ func (h *MessagesHandler) buildModelChain(
 func (h *MessagesHandler) routeOnce(
 	routerMessages []router.MessageContent,
 	tokenCount int,
+	toolCount int,
 	requestedModel string,
 	isStreaming bool,
 ) (router.RouteResult, error) {
@@ -660,7 +751,7 @@ func (h *MessagesHandler) routeOnce(
 		// Streaming: use faster models to minimize TTFT (time-to-first-token)
 		return h.modelRouter.RouteForStreaming(routerMessages, tokenCount, requestedModel)
 	}
-	return h.modelRouter.Route(routerMessages, tokenCount, requestedModel)
+	return h.modelRouter.RouteWithTools(routerMessages, tokenCount, toolCount, requestedModel)
 }
 
 // appendUniqueModels appends models from extra to base, skipping any model_id
@@ -711,6 +802,28 @@ func (h *MessagesHandler) handleStreaming(
 	w.Header().Set("X-Accel-Buffering", "no")
 	rw.WriteHeader(http.StatusOK)
 	rw.Flush()
+
+	// Open the Anthropic stream before any model is attempted. Claude Code
+	// drops a stream that goes ~6s without an Anthropic SSE event, and on a
+	// large request (long context, many tools) upstream TTFT alone can exceed
+	// that while GetStreamingBody blocks.
+	//
+	// Written through WritePreamble so it does NOT set ssePayloadWritten: the
+	// stream is not yet committed to a model and must stay free to fall back.
+	// The per-attempt message_start in the stream proxies is suppressed via
+	// transformer.MessageStartTracker, so the client sees exactly one — and a
+	// fallback does not restart the message mid-stream.
+	// Skipped when any model in the chain streams raw Anthropic: that path
+	// forwards upstream bytes verbatim, including the upstream's own
+	// message_start, so a preamble would give the client two — which reads as
+	// two messages. Which model answers is not known until the loop runs, so
+	// the whole chain has to be clear.
+	if !h.chainUsesRawAnthropic(modelChain) {
+		if err := h.writeStreamPreamble(rw, anthropicReq.Model); err != nil {
+			h.logger.Info("client disconnected before stream preamble", "error", err)
+			return
+		}
+	}
 
 	// Start heartbeat and wait for it to stop before the handler returns so the
 	// HTTP server cannot finalize the response writer during a keepalive flush.
