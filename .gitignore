@@ -28,3 +28,9 @@ node_modules/
 # Generated Windows resource files (built by go-winres in CI)
 *.syso
 .trunk/plugins/*
+
+# Cursor / agent state (keep rules committed, ignore runtime state)
+.cursor/hooks/state/
+
+# SpecStory session artifacts
+.specstory/

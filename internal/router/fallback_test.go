@@ -923,3 +923,101 @@ func TestExecuteWithFallback_AuthErrorNoConfigShortCircuits(t *testing.T) {
 		t.Errorf("expected auth error, got: %v", err)
 	}
 }
+
+func TestIsInsufficientQuotaError_SeparatesQuotaFromRateLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{
+			name: "openai type field",
+			err:  errors.New(`{"error":{"type":"insufficient_quota"}}`),
+			want: true,
+		},
+		{
+			name: "openai code field",
+			err:  errors.New(`{"error":{"code":"insufficient_quota"}}`),
+			want: true,
+		},
+		{
+			name: "gemini prose form",
+			err:  errors.New("You exceeded your current quota, please check your plan and billing details"),
+			want: true,
+		},
+		{
+			name: "plain rate limit is NOT quota exhaustion",
+			err:  &client.APIError{StatusCode: 429, Body: "rate limit exceeded, retry after 2s"},
+			want: false,
+		},
+		{
+			name: "server error is not quota exhaustion",
+			err:  &client.APIError{StatusCode: 503, Body: "service unavailable"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsInsufficientQuotaError(tt.err); got != tt.want {
+				t.Errorf("IsInsufficientQuotaError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A spent quota must open the circuit on the FIRST failure. Left to
+// RecordFailure it would take `threshold` attempts, every one of them a
+// guaranteed-losing request against a provider that is out of credit.
+func TestExecuteWithFallback_QuotaExhaustionOpensCircuitImmediately(t *testing.T) {
+	const threshold = 3
+	h := NewFallbackHandler(nil, threshold, time.Minute)
+
+	models := []config.ModelConfig{
+		{ModelID: "model-a"},
+		{ModelID: "model-b"},
+	}
+
+	_, _, err := h.ExecuteWithFallback(
+		context.Background(),
+		models,
+		func(ctx context.Context, model config.ModelConfig) ([]byte, error) {
+			return nil, &client.APIError{
+				StatusCode: 429,
+				Body:       `{"error":{"type":"insufficient_quota","message":"exceeded your current quota"}}`,
+			}
+		},
+	)
+	if err == nil {
+		t.Fatal("expected all models to fail")
+	}
+
+	// One failure each, well under `threshold` — only ForceOpen gets us here.
+	for _, id := range []string{"model-a", "model-b"} {
+		if got := h.getCircuitBreaker(id).State(); got != CircuitOpen {
+			t.Errorf("%s circuit = %v, want %v after a single quota error (threshold %d)",
+				id, got, CircuitOpen, threshold)
+		}
+	}
+}
+
+// Guards the distinction the switch in ExecuteWithFallback depends on: an
+// ordinary 429 is transient and must NOT force the circuit open.
+func TestExecuteWithFallback_PlainRateLimitDoesNotForceOpen(t *testing.T) {
+	h := NewFallbackHandler(nil, 3, time.Minute)
+
+	models := []config.ModelConfig{{ModelID: "model-a"}}
+
+	_, _, _ = h.ExecuteWithFallback(
+		context.Background(),
+		models,
+		func(ctx context.Context, model config.ModelConfig) ([]byte, error) {
+			return nil, &client.APIError{StatusCode: 429, Body: "rate limit exceeded"}
+		},
+	)
+
+	if got := h.getCircuitBreaker("model-a").State(); got == CircuitOpen {
+		t.Errorf("model-a circuit = %v; a transient 429 must not open it on one failure", got)
+	}
+}

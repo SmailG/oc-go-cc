@@ -50,6 +50,19 @@ func NewCircuitBreaker(threshold int, recoveryTimeout time.Duration) *CircuitBre
 	}
 }
 
+// ForceOpen immediately opens the circuit, bypassing the failure threshold.
+// Use it for failures that a retry cannot fix within the recovery window —
+// hard quota exhaustion, not a transient 429. RecordFailure would need
+// `threshold` consecutive hits to reach the same state, which means that many
+// wasted requests against a provider that is already known to be unusable.
+func (cb *CircuitBreaker) ForceOpen() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.lastFailureTime = time.Now()
+	cb.state = CircuitOpen
+}
+
 // AllowRequest returns whether the circuit should permit a request. In the
 // closed state, all requests pass. In the open state, requests are blocked
 // until recoveryTimeout elapses, at which point the circuit transitions to
@@ -302,7 +315,20 @@ func (h *FallbackHandler) ExecuteWithFallback(
 			)
 		}
 
-		if IsRetryableError(err) {
+		switch {
+		case IsInsufficientQuotaError(err):
+			// Quota exhaustion needs operational intervention, so the circuit
+			// opens straight away rather than after `threshold` more failures.
+			// Distinct from a 429: a rate limit clears on its own, an exhausted
+			// quota does not, and every further request is pure waste.
+			cb.ForceOpen()
+			h.logger.Warn("quota exhausted, opening circuit and trying fallback",
+				"model", model.ModelID,
+				"error", err,
+				"remaining", totalModels-i-1,
+				"circuit_state", cb.State(),
+			)
+		case IsRetryableError(err):
 			cb.RecordFailure()
 			h.logger.Warn("model failed, trying fallback",
 				"model", model.ModelID,
@@ -310,7 +336,7 @@ func (h *FallbackHandler) ExecuteWithFallback(
 				"remaining", totalModels-i-1,
 				"circuit_state", cb.State(),
 			)
-		} else {
+		default:
 			h.logger.Warn("non-retryable error (skipping circuit breaker), trying fallback",
 				"model", model.ModelID,
 				"error", err,
@@ -393,6 +419,27 @@ func IsRetryableError(err error) bool {
 		}
 	}
 	return false
+}
+
+// IsInsufficientQuotaError reports whether the provider says the account's
+// quota is spent, as opposed to a transient 429. OpenCode Go signals its own
+// exhaustion as GoUsageLimitError (see IsUsageLimitError); this covers the
+// OpenAI-compatible shape used by every other provider, which arrives as a 429
+// and is otherwise indistinguishable from a rate limit.
+//
+// Kept as string matching on purpose: the payload is a provider error body,
+// not a typed client.APIError, and the status code alone cannot separate
+// "slow down" from "you are out of credit".
+func IsInsufficientQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Shapes seen in the wild:
+	//   {"type":"insufficient_quota"} / {"code":"insufficient_quota"}
+	//   "You exceeded your current quota, please check your plan and billing"
+	return strings.Contains(s, "insufficient_quota") ||
+		strings.Contains(s, "exceeded your current quota")
 }
 
 // IsUsageLimitError returns true if the error is a GoUsageLimitError.

@@ -1,0 +1,114 @@
+{
+  "api_key": "${OPENROUTER_API_KEY}",
+  "host": "127.0.0.1",
+  "port": 3456,
+  "enable_streaming_scenario_routing": true,
+  "models": {
+    "background": {
+      "provider": "openrouter",
+      "model_id": "qwen/qwen3-coder",
+      "temperature": 0.5,
+      "max_tokens": 2048
+    },
+    "default": {
+      "provider": "openrouter",
+      "model_id": "minimax/minimax-m3",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "think": {
+      "provider": "openrouter",
+      "model_id": "z-ai/glm-5.2",
+      "temperature": 0.7,
+      "max_tokens": 8192
+    },
+    "complex": {
+      "provider": "openrouter",
+      "model_id": "z-ai/glm-5.2",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    },
+    "long_context": {
+      "provider": "openrouter",
+      "model_id": "minimax/minimax-m3",
+      "temperature": 0.7,
+      "max_tokens": 16384,
+      "context_threshold": 80000
+    },
+    "fast": {
+      "provider": "openrouter",
+      "model_id": "qwen/qwen3-coder",
+      "temperature": 0.7,
+      "max_tokens": 4096
+    }
+  },
+  "fallbacks": {
+    "default": [
+      {
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m3"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "z-ai/glm-5.1"
+      }
+    ],
+    "background": [
+      {
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m3"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "moonshotai/kimi-k2.6"
+      }
+    ],
+    "think": [
+      {
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m3"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "moonshotai/kimi-k2.6"
+      }
+    ],
+    "complex": [
+      {
+        "provider": "openrouter",
+        "model_id": "moonshotai/kimi-k2.6"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m3"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "z-ai/glm-5.2"
+      }
+    ],
+    "long_context": [
+      {
+        "provider": "openrouter",
+        "model_id": "moonshotai/kimi-k2.6"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "z-ai/glm-5.2"
+      }
+    ],
+    "fast": [
+      {
+        "provider": "openrouter",
+        "model_id": "minimax/minimax-m3"
+      },
+      {
+        "provider": "openrouter",
+        "model_id": "moonshotai/kimi-k2.6"
+      }
+    ]
+  },
+  "logging": {
+    "level": "info"
+  }
+}
