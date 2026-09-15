@@ -14,8 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"oc-go-cc/internal/client"
 	"oc-go-cc/internal/config"
+	"oc-go-cc/internal/core"
 	"oc-go-cc/internal/metrics"
 	"oc-go-cc/internal/middleware"
 	"oc-go-cc/internal/router"
@@ -56,6 +59,11 @@ type responseWriter struct {
 }
 
 const streamKeepaliveGap = 300 * time.Millisecond
+
+// claudeCodeSessionHeader carries the Claude Code conversation UUID. Its value
+// is forwarded verbatim to OpenCode Go as x-opencode-session, which OpenCode Go
+// requires to route a request (400 MissingSessionID otherwise).
+const claudeCodeSessionHeader = "x-claude-code-session-id"
 
 func (w *responseWriter) WriteHeader(code int) {
 	w.mu.Lock()
@@ -250,6 +258,16 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("X-Request-ID", requestID)
 	logger := h.logger.With("request_id", requestID)
+
+	// Resolve the OpenCode session ID once and carry it on the context so it
+	// reaches every provider call and every fallback attempt. Clients that do
+	// not send one (anything but Claude Code) still get a stable per-request
+	// value, because OpenCode Go rejects requests with no session header.
+	sessionID := r.Header.Get(claudeCodeSessionHeader)
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	r = r.WithContext(core.WithSessionID(r.Context(), sessionID))
 
 	// Rate limiting
 	clientIP := middleware.GetClientIP(r)

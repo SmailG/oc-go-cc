@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"oc-go-cc/internal/config"
+	"oc-go-cc/internal/core"
 	"oc-go-cc/pkg/types"
 )
 
@@ -109,6 +110,22 @@ func IsZen(model config.ModelConfig) bool {
 // IsOpenRouter returns true if the model uses the OpenRouter provider.
 func IsOpenRouter(model config.ModelConfig) bool {
 	return Provider(model) == ProviderOpenRouter
+}
+
+// IsOpenCodeGo returns true if the model uses the OpenCode Go provider.
+func IsOpenCodeGo(model config.ModelConfig) bool {
+	return Provider(model) == ProviderOpenCodeGo
+}
+
+// setOpenCodeSessionHeader forwards the OpenCode session ID from ctx to the
+// upstream request, but only for OpenCode Go models. OpenCode Go rejects
+// requests without it (400 MissingSessionID); Zen and OpenRouter do not accept
+// it and are left untouched.
+func setOpenCodeSessionHeader(h http.Header, ctx context.Context, model config.ModelConfig) {
+	if !IsOpenCodeGo(model) {
+		return
+	}
+	core.SetOpenCodeSessionHeader(h, ctx)
 }
 
 // EndpointType determines which Zen endpoint format to use.
@@ -229,6 +246,7 @@ func (c *OpenCodeClient) ChatCompletion(
 	} else {
 		httpReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
 	}
+	setOpenCodeSessionHeader(httpReq.Header, ctx, modelConfig)
 
 	if req.Stream != nil && *req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
@@ -326,6 +344,7 @@ func (c *OpenCodeClient) SendAnthropicRequest(
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("x-api-key", apiKey)
+	setOpenCodeSessionHeader(httpReq.Header, ctx, modelConfig)
 
 	if stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
@@ -366,6 +385,7 @@ func (c *OpenCodeClient) ResponsesCompletion(
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+	setOpenCodeSessionHeader(httpReq.Header, ctx, modelConfig)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -447,6 +467,7 @@ func (c *OpenCodeClient) GeminiCompletion(
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+endpoint.APIKey)
+	setOpenCodeSessionHeader(httpReq.Header, ctx, modelConfig)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

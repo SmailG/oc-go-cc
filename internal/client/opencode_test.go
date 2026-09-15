@@ -1,9 +1,14 @@
 package client
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"oc-go-cc/internal/config"
+	"oc-go-cc/internal/core"
+	"oc-go-cc/pkg/types"
 )
 
 func TestIsAnthropicModelOnlyRoutesNativeAnthropicModels(t *testing.T) {
@@ -501,5 +506,68 @@ func TestNextAPIKey_ConcurrentSafety(t *testing.T) {
 		if seen[key] != expectedPerKey {
 			t.Errorf("key %q seen %d times, want %d", key, seen[key], expectedPerKey)
 		}
+	}
+}
+
+// TestChatCompletion_SetsOpenCodeSessionHeader guards the header OpenCode Go
+// requires to route a request. Without it the upstream answers
+// 400 MissingSessionID for every model, which is not visible in this repo's
+// own tests -- it only shows up as "all models failed" at runtime.
+func TestChatCompletion_SetsOpenCodeSessionHeader(t *testing.T) {
+	var got string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(core.OpenCodeSessionHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","choices":[]}`))
+	}))
+	defer ts.Close()
+
+	tests := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "opencode-go receives the session header", provider: ProviderOpenCodeGo, want: "session-1"},
+		{name: "empty provider defaults to opencode-go", provider: "", want: "session-1"},
+		{name: "zen does not receive the session header", provider: ProviderOpenCodeZen, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got = ""
+			cfg := &config.Config{
+				APIKey:      "test-key",
+				OpenCodeGo:  config.OpenCodeGoConfig{BaseURL: ts.URL},
+				OpenCodeZen: config.OpenCodeZenConfig{BaseURL: ts.URL},
+			}
+			c := NewOpenCodeClient(config.NewAtomicConfig(cfg, ""))
+
+			model := config.ModelConfig{Provider: tt.provider}
+			ctx := core.WithSessionID(context.Background(), "session-1")
+			req := &types.ChatCompletionRequest{Model: "kimi-k2.6"}
+
+			resp, err := c.ChatCompletion(ctx, "kimi-k2.6", req, model)
+			if err != nil {
+				t.Fatalf("ChatCompletion() error = %v", err)
+			}
+			_ = resp.Body.Close()
+
+			if got != tt.want {
+				t.Errorf("%s = %q, want %q", core.OpenCodeSessionHeader, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSetOpenCodeSessionHeader_NoSessionInContext verifies the header is simply
+// absent rather than set empty when the context carries no session ID, so a
+// caller that forgot to seed the context fails loudly upstream instead of
+// sending a blank identifier.
+func TestSetOpenCodeSessionHeader_NoSessionInContext(t *testing.T) {
+	h := http.Header{}
+	setOpenCodeSessionHeader(h, context.Background(), config.ModelConfig{Provider: ProviderOpenCodeGo})
+
+	if _, ok := h[http.CanonicalHeaderKey(core.OpenCodeSessionHeader)]; ok {
+		t.Errorf("%s was set with no session ID in context", core.OpenCodeSessionHeader)
 	}
 }
