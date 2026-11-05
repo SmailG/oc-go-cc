@@ -88,58 +88,70 @@ func stripMessageCacheControl(msg *types.ChatMessage) {
 	}
 }
 
-// keepsContentBlockCacheControl reports whether the provider takes Anthropic
-// style cache markers inside OpenAI content blocks. Alibaba Model Studio's
-// explicit cache does (qwen3.6-flash / qwen3.6-plus can only cache this way);
-// the other OpenAI-format providers may reject the field, so they strip it.
-func keepsContentBlockCacheControl(model config.ModelConfig) bool {
+// keepsClientCacheControl reports whether the provider gets the client's
+// cache markers, serialised inside OpenAI content blocks. Per
+// docs/adr/0002-client-owned-cache-directives.md an adapter drops a directive
+// only when the wire format cannot carry it or a failure was observed.
+// Model Studio's explicit cache (qwen3.6-flash / qwen3.6-plus can only cache
+// this way) has neither; the escape hatch is `wire_format: "anthropic"`. The
+// other OpenAI-format providers keep stripping (LEARNINGS.md: some reject
+// the field in messages).
+func keepsClientCacheControl(model config.ModelConfig) bool {
 	return config.NormalizeProvider(model.Provider) == config.ProviderModelStudio
 }
 
-// moveCacheControlIntoContent rewrites each system/user/assistant message so
-// its cache marker sits on the last non-empty text content part, serialised as
-// a content-array element: {"content":[{"type":"text","text":"...",
-// "cache_control":{"type":"ephemeral"}}]}. A message-level marker is removed
-// because Alibaba reads markers from content blocks only. A marker with no text
-// part to carry it is dropped, and so is every marker on a tool-role message
-// (Alibaba documents markers on system/user/assistant content only).
+// moveCacheControlIntoContent serialises each message's cache marker inside a
+// content-array element, the form Alibaba reads:
+// {"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]}.
+//
+//   - A marker already on a content part (image, text) stays where the client
+//     put it.
+//   - A message-level marker goes on the LAST content part of any type: in
+//     Anthropic semantics a marker caches the prefix through its block, and the
+//     converted message is one unit, so its end is where that prefix ends.
+//     String content becomes a single text part. When a part already carries a
+//     marker the message-level one is the same marker (transformUserMessage
+//     copies the first block's marker onto both) and is not placed twice.
+//   - Structural drop: a marker on a message with no content part to carry it
+//     (empty content, e.g. an assistant turn that is only tool_calls, whose
+//     entries have no cache_control field) is dropped; an empty text part is
+//     not invented.
 func moveCacheControlIntoContent(messages []types.ChatMessage) {
 	for i := range messages {
 		msg := &messages[i]
-		if msg.Role == "tool" {
-			stripMessageCacheControl(msg)
-			continue
-		}
 		marker := msg.CacheControl
 		msg.CacheControl = nil
+		if marker == nil {
+			continue
+		}
 
 		var parts []types.ChatContentPart
 		if json.Unmarshal(msg.Content, &parts) != nil {
-			// String content: wrap it only when there is a marker to carry.
 			var text string
-			if marker == nil || json.Unmarshal(msg.Content, &text) != nil || text == "" {
+			if json.Unmarshal(msg.Content, &text) != nil || text == "" {
 				continue
 			}
 			parts = []types.ChatContentPart{{Type: "text", Text: text}}
 		}
-		for j := range parts {
-			if marker == nil {
-				marker = parts[j].CacheControl
-			}
-			parts[j].CacheControl = nil
+		if len(parts) == 0 {
+			continue
 		}
-		if marker != nil {
-			for j := len(parts) - 1; j >= 0; j-- {
-				if parts[j].Type == "text" && parts[j].Text != "" {
-					parts[j].CacheControl = marker
-					break
-				}
-			}
+		if !hasPartCacheControl(parts) {
+			parts[len(parts)-1].CacheControl = marker
 		}
 		if content, err := json.Marshal(parts); err == nil {
 			msg.Content = content
 		}
 	}
+}
+
+func hasPartCacheControl(parts []types.ChatContentPart) bool {
+	for _, p := range parts {
+		if p.CacheControl != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // TransformRequest converts an Anthropic MessageRequest to OpenAI ChatCompletionRequest.
@@ -153,13 +165,13 @@ func (t *RequestTransformer) TransformRequest(
 		return nil, fmt.Errorf("failed to transform messages: %w", err)
 	}
 
-	// DeepSeek keeps the message-level marker as is. Model Studio keeps the
-	// marker but inside content blocks, where its explicit cache reads it.
-	// Every other model gets cache_control stripped: some providers reject
-	// unknown fields in messages (LEARNINGS.md).
+	// DeepSeek keeps the message-level marker as is. Model Studio keeps every
+	// marker the client sent, inside content blocks where its explicit cache
+	// reads it. Every other model gets cache_control stripped: some providers
+	// reject unknown fields in messages (LEARNINGS.md).
 	switch {
 	case isDeepSeekModel(model.ModelID):
-	case keepsContentBlockCacheControl(model):
+	case keepsClientCacheControl(model):
 		moveCacheControlIntoContent(messages)
 	default:
 		stripCacheControl(messages)
@@ -216,9 +228,9 @@ func (t *RequestTransformer) TransformRequest(
 	// Transform tools if present
 	if len(anthropicReq.Tools) > 0 {
 		openaiReq.Tools = t.transformTools(anthropicReq.Tools)
-		// Tool markers stay only for DeepSeek: Alibaba documents markers on
-		// system/message content, not on tool definitions.
-		if !isDeepSeekModel(model.ModelID) {
+		// Tool markers stay for DeepSeek and Model Studio (the Anthropic
+		// passthrough already sends them to Alibaba); other models strip them.
+		if !isDeepSeekModel(model.ModelID) && !keepsClientCacheControl(model) {
 			for i := range openaiReq.Tools {
 				openaiReq.Tools[i].CacheControl = nil
 			}

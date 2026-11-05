@@ -126,14 +126,15 @@ func TestModelStudioKeepsCacheControlInsideContentBlocks(t *testing.T) {
 			if _, ok := msgs[2]["tool_calls"]; !ok {
 				t.Errorf("assistant lost its tool_calls: %v", msgs[2])
 			}
-			// tool result: role "tool" keeps plain string content and no marker
+			// tool result: role "tool" carries the marker in a content part (the moving breakpoint of an agent loop)
 			if msgs[3]["role"] != "tool" {
 				t.Fatalf("message 3 role = %v, want tool", msgs[3]["role"])
 			}
-			if s, ok := msgs[3]["content"].(string); !ok || s != "file body" {
-				t.Errorf("tool message content = %v, want the plain string", msgs[3]["content"])
+			toolParts := contentParts(t, msgs[3])
+			if len(toolParts) != 1 || toolParts[0]["text"] != "file body" || !hasMarker(toolParts[0]) {
+				t.Errorf("tool message content = %v, want text block with the marker", toolParts)
 			}
-			// assistant with a tool call and no text: no empty text block is invented
+			// structural drop: an assistant turn that is only tool_calls has no content part to carry the marker, and none is invented
 			if s, ok := msgs[4]["content"].(string); !ok || s != "" {
 				t.Errorf("tool-only assistant content = %v, want the empty string", msgs[4]["content"])
 			}
@@ -143,37 +144,39 @@ func TestModelStudioKeepsCacheControlInsideContentBlocks(t *testing.T) {
 				t.Errorf("last user content = %v, want one joined text block with the marker", last)
 			}
 
-			// tools never carry the marker for model-studio
+			// tool definitions keep the marker, serialised as for DeepSeek
 			tools, _ := decoded["tools"].([]any)
 			if len(tools) != 1 {
 				t.Fatalf("got %d tools, want 1", len(tools))
 			}
-			if tool, _ := tools[0].(map[string]any); hasMarker(tool) {
-				t.Errorf("tool definition kept its cache_control: %v", tool)
+			if tool, _ := tools[0].(map[string]any); !hasMarker(tool) {
+				t.Errorf("tool definition lost its cache_control: %v", tool)
 			}
 		})
 	}
 }
 
-func TestModelStudioDropsMarkerFromNonTextParts(t *testing.T) {
+// Part-level markers are kept where the client put them, on any part type.
+func TestModelStudioKeepsMarkersOnNonTextParts(t *testing.T) {
 	req := &types.MessageRequest{
 		Model:     "claude-sonnet-5",
 		MaxTokens: 10,
 		Messages: []types.Message{{Role: "user", Content: json.RawMessage(`[
-			{"type":"text","text":"look","cache_control":` + ephemeralJSON + `},
+			{"type":"text","text":"look"},
 			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"},"cache_control":` + ephemeralJSON + `}
 		]`)}},
 	}
 	raw, decoded := wireJSON(t, req, config.ModelConfig{ModelID: "qwen3.6-plus", Provider: config.ProviderModelStudio, Vision: true})
-	parts := contentParts(t, wireMessages(t, decoded)[0])
+	msg := wireMessages(t, decoded)[0]
+	if _, present := msg["cache_control"]; present {
+		t.Errorf("top-level cache_control on the message: %s", raw)
+	}
+	parts := contentParts(t, msg)
 	if len(parts) != 2 || parts[0]["type"] != "text" || parts[1]["type"] != "image_url" {
 		t.Fatalf("parts = %v, want text then image_url", parts)
 	}
-	if !hasMarker(parts[0]) {
-		t.Errorf("text part lost the marker: %v", parts[0])
-	}
-	if _, present := parts[1]["cache_control"]; present {
-		t.Errorf("image_url part carries cache_control: %s", raw)
+	if !hasMarker(parts[1]) {
+		t.Errorf("image_url part lost the client's marker: %s", raw)
 	}
 }
 
@@ -252,29 +255,70 @@ func TestModelStudioLeavesUnmarkedMessagesAlone(t *testing.T) {
 	}
 }
 
-// A request built by TransformRequest has at most one text part per message, so
-// the "last non-empty text part" rule is pinned directly.
-func TestMoveCacheControlIntoContentPicksLastNonEmptyTextPart(t *testing.T) {
+func decodeParts(t *testing.T, msg types.ChatMessage) []types.ChatContentPart {
+	t.Helper()
+	var parts []types.ChatContentPart
+	if err := json.Unmarshal(msg.Content, &parts); err != nil {
+		t.Fatalf("content is not an array: %v", err)
+	}
+	return parts
+}
+
+// A message-level marker lands on the LAST part of any type; the request
+// transformer produces such a message only with string content, so the array
+// case is pinned directly.
+func TestMoveCacheControlIntoContentPlacesMessageMarkerOnLastPart(t *testing.T) {
+	marker := &types.CacheControl{Type: "ephemeral"}
+	content, _ := json.Marshal([]types.ChatContentPart{
+		{Type: "text", Text: "first"},
+		{Type: "text", Text: "second"},
+		{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,abc"}},
+	})
+	msgs := []types.ChatMessage{{Role: "user", Content: content, CacheControl: marker}}
+
+	moveCacheControlIntoContent(msgs)
+
+	if msgs[0].CacheControl != nil {
+		t.Errorf("message-level marker was left on the message")
+	}
+	for i, p := range decodeParts(t, msgs[0]) {
+		if wantMarker := i == 2; (p.CacheControl != nil) != wantMarker {
+			t.Errorf("part %d (%s) marker = %v, want marker=%v", i, p.Type, p.CacheControl, wantMarker)
+		}
+	}
+}
+
+// When the client already put a marker on a part, that part keeps it and the
+// copied message-level marker is not placed a second time.
+func TestMoveCacheControlIntoContentKeepsPartMarkersWhereTheyAre(t *testing.T) {
 	marker := &types.CacheControl{Type: "ephemeral"}
 	content, _ := json.Marshal([]types.ChatContentPart{
 		{Type: "text", Text: "first", CacheControl: marker},
-		{Type: "text", Text: "second"},
-		{Type: "text", Text: ""},
 		{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,abc"}},
+	})
+	msgs := []types.ChatMessage{{Role: "user", Content: content, CacheControl: marker}}
+
+	moveCacheControlIntoContent(msgs)
+
+	parts := decodeParts(t, msgs[0])
+	if parts[0].CacheControl == nil || parts[1].CacheControl != nil {
+		t.Errorf("markers = %v / %v, want text part marked and image part not", parts[0].CacheControl, parts[1].CacheControl)
+	}
+}
+
+// Without a message-level marker, part markers pass through untouched.
+func TestMoveCacheControlIntoContentLeavesPartOnlyMarkersAlone(t *testing.T) {
+	marker := &types.CacheControl{Type: "ephemeral"}
+	content, _ := json.Marshal([]types.ChatContentPart{
+		{Type: "text", Text: "a"},
+		{Type: "image_url", ImageURL: &types.ImageURL{URL: "u"}, CacheControl: marker},
 	})
 	msgs := []types.ChatMessage{{Role: "user", Content: content}}
 
 	moveCacheControlIntoContent(msgs)
 
-	var parts []types.ChatContentPart
-	if err := json.Unmarshal(msgs[0].Content, &parts); err != nil {
-		t.Fatalf("content is not an array: %v", err)
-	}
-	for i, p := range parts {
-		wantMarker := i == 1
-		if (p.CacheControl != nil) != wantMarker {
-			t.Errorf("part %d (%q) marker = %v, want marker=%v", i, p.Text, p.CacheControl, wantMarker)
-		}
+	if string(msgs[0].Content) != string(content) {
+		t.Errorf("content changed:\n got %s\nwant %s", msgs[0].Content, content)
 	}
 }
 
@@ -294,5 +338,28 @@ func TestOtherProvidersStripMarkersFromMultimodalParts(t *testing.T) {
 	}
 	if strings.Contains(raw, "cache_control") {
 		t.Fatalf("cache_control leaked on a multimodal part: %s", raw)
+	}
+}
+
+// Structural drops: a marker with no content part to carry it is removed
+// without inventing a part (and without indexing an empty array).
+func TestMoveCacheControlIntoContentDropsMarkerWithNoPartToCarryIt(t *testing.T) {
+	marker := &types.CacheControl{Type: "ephemeral"}
+	for name, content := range map[string]string{
+		"empty string": `""`,
+		"empty array":  `[]`,
+		"null":         `null`,
+		"absent":       ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			msgs := []types.ChatMessage{{Role: "assistant", Content: json.RawMessage(content), CacheControl: marker}}
+			moveCacheControlIntoContent(msgs)
+			if msgs[0].CacheControl != nil {
+				t.Errorf("message-level marker survived")
+			}
+			if string(msgs[0].Content) != content {
+				t.Errorf("content = %s, want it untouched (%s)", msgs[0].Content, content)
+			}
+		})
 	}
 }
