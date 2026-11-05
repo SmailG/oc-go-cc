@@ -70,6 +70,7 @@ func usageViaStream(t *testing.T, usage json.RawMessage) types.Usage {
 	}
 	if got == nil {
 		t.Fatalf("no usage event in stream:\n%s", w.buf.String())
+		return types.Usage{}
 	}
 	return *got
 }
