@@ -28,10 +28,17 @@ func nonNegative(n int) int {
 // here so they cannot disagree.
 //
 // DeepSeek reports prompt_cache_hit_tokens / prompt_cache_miss_tokens; the miss
-// count is reported as cache creation, which keeps the total intact.
+// count is reported as cache creation, which keeps the total intact. Other
+// OpenAI-compatible providers (Alibaba Model Studio) report
+// prompt_tokens_details.cached_tokens and, for explicit cache,
+// cache_creation_input_tokens. The DeepSeek fields win when either is non-zero.
 func openAIUsageToAnthropic(usage types.UsageInfo) types.Usage {
 	read := usage.PromptCacheHitTokens
 	creation := usage.PromptCacheMissTokens
+	if read == 0 && creation == 0 && usage.PromptTokensDetails != nil {
+		read = usage.PromptTokensDetails.CachedTokens
+		creation = usage.PromptTokensDetails.CacheCreationInputTokens
+	}
 	return types.Usage{
 		InputTokens:              nonNegative(usage.PromptTokens - read - creation),
 		OutputTokens:             usage.CompletionTokens,

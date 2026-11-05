@@ -86,8 +86,20 @@ func TestUsageParity_StreamingAndNonStreamingAgree(t *testing.T) {
 	}{
 		// DeepSeek: miss is reported as cache creation (keeps the total).
 		{"deepseek.json", 0, 800, 200, true},
+		// Alibaba/OpenAI implicit cache: cached_tokens is included in prompt_tokens.
+		{"alibaba_implicit.json", 400, 600, 0, true},
+		// Alibaba explicit cache: hit + creation both inside prompt_tokens.
+		{"alibaba_explicit.json", 200, 300, 500, true},
 		// No cache fields at all: unchanged, everything is plain input.
 		{"no_cache.json", 1000, 0, 0, true},
+		// A details object carrying zeros is the same as no cache fields.
+		{"details_without_cache.json", 1000, 0, 0, true},
+		// DeepSeek fields win when non-zero, details are ignored.
+		{"deepseek_wins.json", 0, 800, 200, true},
+		// A DeepSeek hit with a zero miss still counts as DeepSeek usage.
+		{"deepseek_hit_only_wins.json", 0, 1000, 0, true},
+		// read + creation exceed prompt_tokens: input floors at 0, never negative.
+		{"overcount.json", 0, 80, 50, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.fixture, func(t *testing.T) {
