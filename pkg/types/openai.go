@@ -167,6 +167,17 @@ type UsageInfo struct {
 	TotalTokens           int `json:"total_tokens"`
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	// PromptTokensDetails is the OpenAI-standard cache breakdown (also sent by
+	// Alibaba Model Studio). Both counts are included in PromptTokens.
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails carries the cache counts of an OpenAI-compatible usage object.
+type PromptTokensDetails struct {
+	// CachedTokens are prompt tokens served from the cache.
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	// CacheCreationInputTokens are prompt tokens written to an explicit cache.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // ChatCompletionChunk represents a streaming chunk from the Chat Completions API.

@@ -69,18 +69,89 @@ func constrainTemperature(modelID string, temp float64) float64 {
 // The caller must not hold references to the slice elements.
 func stripCacheControl(messages []types.ChatMessage) {
 	for i := range messages {
-		messages[i].CacheControl = nil
-		var parts []types.ChatContentPart
-		if err := json.Unmarshal(messages[i].Content, &parts); err != nil {
+		stripMessageCacheControl(&messages[i])
+	}
+}
+
+// stripMessageCacheControl removes cache_control from one message and its content parts.
+func stripMessageCacheControl(msg *types.ChatMessage) {
+	msg.CacheControl = nil
+	var parts []types.ChatContentPart
+	if err := json.Unmarshal(msg.Content, &parts); err != nil {
+		return
+	}
+	for j := range parts {
+		parts[j].CacheControl = nil
+	}
+	if content, err := json.Marshal(parts); err == nil {
+		msg.Content = content
+	}
+}
+
+// keepsClientCacheControl reports whether the provider gets the client's
+// cache markers, serialised inside OpenAI content blocks. Per
+// docs/adr/0002-client-owned-cache-directives.md an adapter drops a directive
+// only when the wire format cannot carry it or a failure was observed.
+// Model Studio's explicit cache (qwen3.6-flash / qwen3.6-plus can only cache
+// this way) has neither; the escape hatch is `wire_format: "anthropic"`. The
+// other OpenAI-format providers keep stripping (LEARNINGS.md: some reject
+// the field in messages).
+func keepsClientCacheControl(model config.ModelConfig) bool {
+	return config.NormalizeProvider(model.Provider) == config.ProviderModelStudio
+}
+
+// moveCacheControlIntoContent serialises each message's cache marker inside a
+// content-array element, the form Alibaba reads:
+// {"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]}.
+//
+//   - A marker already on a content part (image, text) stays where the client
+//     put it.
+//   - A message-level marker goes on the LAST content part of any type: in
+//     Anthropic semantics a marker caches the prefix through its block, and the
+//     converted message is one unit, so its end is where that prefix ends.
+//     String content becomes a single text part. When a part already carries a
+//     marker the message-level one is the same marker (transformUserMessage
+//     copies the first text block's marker onto both) and is not placed twice.
+//   - Structural drop: a marker on a message with no content part to carry it
+//     (empty content, e.g. an assistant turn that is only tool_calls, whose
+//     entries have no cache_control field) is dropped; an empty text part is
+//     not invented.
+func moveCacheControlIntoContent(messages []types.ChatMessage) {
+	for i := range messages {
+		msg := &messages[i]
+		marker := msg.CacheControl
+		msg.CacheControl = nil
+		if marker == nil {
 			continue
 		}
-		for j := range parts {
-			parts[j].CacheControl = nil
+
+		var parts []types.ChatContentPart
+		if json.Unmarshal(msg.Content, &parts) != nil {
+			var text string
+			if json.Unmarshal(msg.Content, &text) != nil || text == "" {
+				continue
+			}
+			parts = []types.ChatContentPart{{Type: "text", Text: text}}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		if !hasPartCacheControl(parts) {
+			parts[len(parts)-1].CacheControl = marker
 		}
 		if content, err := json.Marshal(parts); err == nil {
-			messages[i].Content = content
+			msg.Content = content
 		}
 	}
+}
+
+func hasPartCacheControl(parts []types.ChatContentPart) bool {
+	for _, p := range parts {
+		if p.CacheControl != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // TransformRequest converts an Anthropic MessageRequest to OpenAI ChatCompletionRequest.
@@ -89,13 +160,23 @@ func (t *RequestTransformer) TransformRequest(
 	model config.ModelConfig,
 ) (*types.ChatCompletionRequest, error) {
 	// Transform messages
-	messages, err := t.transformMessages(anthropicReq, model.ModelID, model.Vision)
+	// Model Studio gets one wire marker per client marker; DeepSeek keeps
+	// lifting the first block's marker onto the message (its tests pin that).
+	textMarkerOnly := keepsClientCacheControl(model) && !isDeepSeekModel(model.ModelID)
+	messages, err := t.transformMessages(anthropicReq, model.ModelID, model.Vision, textMarkerOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform messages: %w", err)
 	}
 
-	// Strip cache_control for models that don't support it
-	if !isDeepSeekModel(model.ModelID) {
+	// DeepSeek keeps the message-level marker as is. Model Studio keeps every
+	// marker the client sent, inside content blocks where its explicit cache
+	// reads it. Every other model gets cache_control stripped: some providers
+	// reject unknown fields in messages (LEARNINGS.md).
+	switch {
+	case isDeepSeekModel(model.ModelID):
+	case keepsClientCacheControl(model):
+		moveCacheControlIntoContent(messages)
+	default:
 		stripCacheControl(messages)
 	}
 
@@ -150,7 +231,9 @@ func (t *RequestTransformer) TransformRequest(
 	// Transform tools if present
 	if len(anthropicReq.Tools) > 0 {
 		openaiReq.Tools = t.transformTools(anthropicReq.Tools)
-		if !isDeepSeekModel(model.ModelID) {
+		// Tool markers stay for DeepSeek and Model Studio (the Anthropic
+		// passthrough already sends them to Alibaba); other models strip them.
+		if !isDeepSeekModel(model.ModelID) && !keepsClientCacheControl(model) {
 			for i := range openaiReq.Tools {
 				openaiReq.Tools[i].CacheControl = nil
 			}
@@ -339,7 +422,7 @@ func hasAssistantMessages(messages []types.Message) bool {
 }
 
 // transformMessages converts Anthropic messages to OpenAI format.
-func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageRequest, modelID string, vision bool) ([]types.ChatMessage, error) {
+func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageRequest, modelID string, vision bool, textMarkerOnly bool) ([]types.ChatMessage, error) {
 	hasThinking := HasThinkingBlocks(anthropicReq.Messages)
 
 	var result []types.ChatMessage
@@ -413,7 +496,7 @@ func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageReques
 			})
 			continue
 		}
-		openaiMsgs, err := t.transformMessage(msg, modelID, hasThinking, vision)
+		openaiMsgs, err := t.transformMessage(msg, modelID, hasThinking, vision, textMarkerOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -425,12 +508,12 @@ func (t *RequestTransformer) transformMessages(anthropicReq *types.MessageReques
 
 // transformMessage converts a single Anthropic message to one or more OpenAI messages.
 // Tool_use and tool_result require special handling to map to OpenAI's function calling format.
-func (t *RequestTransformer) transformMessage(msg types.Message, modelID string, hasThinkingInHistory bool, vision bool) ([]types.ChatMessage, error) {
+func (t *RequestTransformer) transformMessage(msg types.Message, modelID string, hasThinkingInHistory bool, vision bool, textMarkerOnly bool) ([]types.ChatMessage, error) {
 	blocks := msg.ContentBlocks()
 
 	switch msg.Role {
 	case "user":
-		return t.transformUserMessage(blocks, vision)
+		return t.transformUserMessage(blocks, vision, textMarkerOnly)
 	case "assistant":
 		return t.transformAssistantMessage(blocks, modelID, hasThinkingInHistory)
 	default:
@@ -450,7 +533,13 @@ func (t *RequestTransformer) transformMessage(msg types.Message, modelID string,
 // with image_url parts) so that vision-capable models receive the actual image data.
 // For models without vision support, image blocks are replaced with a "[Image]" text
 // placeholder to prevent upstream 400 errors from unsupported image_url parts.
-func (t *RequestTransformer) transformUserMessage(blocks []types.ContentBlock, vision bool) ([]types.ChatMessage, error) {
+//
+// The message-level marker is the first marker found. With textMarkerOnly
+// (Model Studio) only text blocks feed it: a tool_result marker already sits on
+// its own role:"tool" message and an image marker on its image part, so
+// lifting either onto the text message would put a second marker on the wire
+// that the client never sent.
+func (t *RequestTransformer) transformUserMessage(blocks []types.ContentBlock, vision bool, textMarkerOnly bool) ([]types.ChatMessage, error) {
 	var result []types.ChatMessage
 	var textParts []string
 	var imageParts []types.ChatContentPart
@@ -458,7 +547,7 @@ func (t *RequestTransformer) transformUserMessage(blocks []types.ContentBlock, v
 	var messageCacheControl *types.CacheControl
 
 	for _, block := range blocks {
-		if messageCacheControl == nil {
+		if messageCacheControl == nil && (!textMarkerOnly || block.Type == "text") {
 			messageCacheControl = block.CacheControl
 		}
 		switch block.Type {

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-oc","object":"chat.completion","created":1,"model":"qwen3.6-plus","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80,"cache_creation_input_tokens":50}}}

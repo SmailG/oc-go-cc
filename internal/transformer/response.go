@@ -21,6 +21,32 @@ func nonNegative(n int) int {
 	return n
 }
 
+// openAIUsageToAnthropic maps Chat Completions usage to Anthropic's disjoint
+// token counts: input_tokens excludes cache reads and cache writes, so
+// input + cache_read + cache_creation equals prompt_tokens. Every OpenAI-format
+// path (non-streaming transformer, provider bridge, SSE stream) goes through
+// here so they cannot disagree.
+//
+// DeepSeek reports prompt_cache_hit_tokens / prompt_cache_miss_tokens; the miss
+// count is reported as cache creation, which keeps the total intact. Other
+// OpenAI-compatible providers (Alibaba Model Studio) report
+// prompt_tokens_details.cached_tokens and, for explicit cache,
+// cache_creation_input_tokens. The DeepSeek fields win when either is non-zero.
+func openAIUsageToAnthropic(usage types.UsageInfo) types.Usage {
+	read := usage.PromptCacheHitTokens
+	creation := usage.PromptCacheMissTokens
+	if read == 0 && creation == 0 && usage.PromptTokensDetails != nil {
+		read = usage.PromptTokensDetails.CachedTokens
+		creation = usage.PromptTokensDetails.CacheCreationInputTokens
+	}
+	return types.Usage{
+		InputTokens:              nonNegative(usage.PromptTokens - read - creation),
+		OutputTokens:             usage.CompletionTokens,
+		CacheCreationInputTokens: creation,
+		CacheReadInputTokens:     read,
+	}
+}
+
 // NewResponseTransformer creates a new response transformer.
 func NewResponseTransformer() *ResponseTransformer {
 	return &ResponseTransformer{}
@@ -55,20 +81,9 @@ func (t *ResponseTransformer) TransformResponse(
 		Model:        originalModel,
 		StopReason:   stopReason,
 		StopSequence: "",
-		Usage: types.Usage{
-			// Per Anthropic Messages API spec, `input_tokens` is the count of
-			// regular input tokens — i.e. tokens that were neither read from
-			// the cache nor written to the cache this turn. OpenAI's
-			// `prompt_tokens` is the *total* prompt size including both. When
-			// the upstream reports prompt-cache fields we have to subtract
-			// them out, otherwise Claude Code's local context counter sees an
-			// inflated input_tokens on every turn and trips auto-compact ~5x
-			// too early on long-prefix sessions.
-			InputTokens:              nonNegative(openaiResp.Usage.PromptTokens - openaiResp.Usage.PromptCacheHitTokens - openaiResp.Usage.PromptCacheMissTokens),
-			OutputTokens:             openaiResp.Usage.CompletionTokens,
-			CacheCreationInputTokens: openaiResp.Usage.PromptCacheMissTokens,
-			CacheReadInputTokens:     openaiResp.Usage.PromptCacheHitTokens,
-		},
+		// Per Anthropic Messages API spec, `input_tokens` excludes cache reads
+		// and writes; see openAIUsageToAnthropic.
+		Usage: openAIUsageToAnthropic(openaiResp.Usage),
 	}
 
 	return anthropicResp, nil
