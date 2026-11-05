@@ -29,6 +29,34 @@ The passthrough is asymmetric, and worth being precise about:
   thinking, where the client's values stand because Anthropic validates them against the thinking
   budget.
 
+### Prompt caching on the Chat Completions path
+
+On the Anthropic path (`anthropic_base_url`) the request goes through with its `cache_control`
+markers intact. On the Chat Completions path the proxy keeps them for Model Studio too, in the form
+Alibaba's explicit cache reads:
+
+- A marker on the system prompt, a user message or an assistant message is written inside the
+  **last text content block** of that message
+  (`"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]`), not as a field
+  on the message. Alibaba's explicit-cache-only models (`qwen3.6-flash`, `qwen3.6-plus`) cannot cache
+  without it.
+- Markers on tool definitions, on tool-result (`role: "tool"`) messages and on image parts are
+  dropped: Alibaba documents markers on message content only, and the proxy has not sent them in
+  those positions.
+- The proxy never adds or infers a marker; it only keeps the ones the client sent
+  (`docs/adr/0002-client-owned-cache-directives.md`).
+- This is decided by the provider, not the model: a `deepseek-*` model ID served by Model Studio
+  keeps the DeepSeek form (message-level marker, tool markers kept).
+
+Cache use is read from the reply's `usage`: `prompt_tokens_details.cached_tokens` (cache reads) and
+`prompt_tokens_details.cache_creation_input_tokens` (explicit-cache writes), both counted inside
+`prompt_tokens`. They are reported to the client as `cache_read_input_tokens` and
+`cache_creation_input_tokens`, and `input_tokens` is what remains
+(`prompt_tokens` − reads − writes, never below 0). Streaming and non-streaming replies report the
+same numbers.
+
+> Not verified against the live API: these behaviours are covered by unit tests on fixture bodies.
+
 ## Quick start
 
 ```bash
