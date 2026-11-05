@@ -69,16 +69,75 @@ func constrainTemperature(modelID string, temp float64) float64 {
 // The caller must not hold references to the slice elements.
 func stripCacheControl(messages []types.ChatMessage) {
 	for i := range messages {
-		messages[i].CacheControl = nil
-		var parts []types.ChatContentPart
-		if err := json.Unmarshal(messages[i].Content, &parts); err != nil {
+		stripMessageCacheControl(&messages[i])
+	}
+}
+
+// stripMessageCacheControl removes cache_control from one message and its content parts.
+func stripMessageCacheControl(msg *types.ChatMessage) {
+	msg.CacheControl = nil
+	var parts []types.ChatContentPart
+	if err := json.Unmarshal(msg.Content, &parts); err != nil {
+		return
+	}
+	for j := range parts {
+		parts[j].CacheControl = nil
+	}
+	if content, err := json.Marshal(parts); err == nil {
+		msg.Content = content
+	}
+}
+
+// keepsContentBlockCacheControl reports whether the provider takes Anthropic
+// style cache markers inside OpenAI content blocks. Alibaba Model Studio's
+// explicit cache does (qwen3.6-flash / qwen3.6-plus can only cache this way);
+// the other OpenAI-format providers may reject the field, so they strip it.
+func keepsContentBlockCacheControl(model config.ModelConfig) bool {
+	return config.NormalizeProvider(model.Provider) == config.ProviderModelStudio
+}
+
+// moveCacheControlIntoContent rewrites each system/user/assistant message so
+// its cache marker sits on the last non-empty text content part, serialised as
+// a content-array element: {"content":[{"type":"text","text":"...",
+// "cache_control":{"type":"ephemeral"}}]}. A message-level marker is removed
+// because Alibaba reads markers from content blocks only. A marker with no text
+// part to carry it is dropped, and so is every marker on a tool-role message
+// (Alibaba documents markers on system/user/assistant content only).
+func moveCacheControlIntoContent(messages []types.ChatMessage) {
+	for i := range messages {
+		msg := &messages[i]
+		if msg.Role == "tool" {
+			stripMessageCacheControl(msg)
 			continue
 		}
+		marker := msg.CacheControl
+		msg.CacheControl = nil
+
+		var parts []types.ChatContentPart
+		if json.Unmarshal(msg.Content, &parts) != nil {
+			// String content: wrap it only when there is a marker to carry.
+			var text string
+			if marker == nil || json.Unmarshal(msg.Content, &text) != nil || text == "" {
+				continue
+			}
+			parts = []types.ChatContentPart{{Type: "text", Text: text}}
+		}
 		for j := range parts {
+			if marker == nil {
+				marker = parts[j].CacheControl
+			}
 			parts[j].CacheControl = nil
 		}
+		if marker != nil {
+			for j := len(parts) - 1; j >= 0; j-- {
+				if parts[j].Type == "text" && parts[j].Text != "" {
+					parts[j].CacheControl = marker
+					break
+				}
+			}
+		}
 		if content, err := json.Marshal(parts); err == nil {
-			messages[i].Content = content
+			msg.Content = content
 		}
 	}
 }
@@ -94,8 +153,15 @@ func (t *RequestTransformer) TransformRequest(
 		return nil, fmt.Errorf("failed to transform messages: %w", err)
 	}
 
-	// Strip cache_control for models that don't support it
-	if !isDeepSeekModel(model.ModelID) {
+	// DeepSeek keeps the message-level marker as is. Model Studio keeps the
+	// marker but inside content blocks, where its explicit cache reads it.
+	// Every other model gets cache_control stripped: some providers reject
+	// unknown fields in messages (LEARNINGS.md).
+	switch {
+	case isDeepSeekModel(model.ModelID):
+	case keepsContentBlockCacheControl(model):
+		moveCacheControlIntoContent(messages)
+	default:
 		stripCacheControl(messages)
 	}
 
@@ -150,6 +216,8 @@ func (t *RequestTransformer) TransformRequest(
 	// Transform tools if present
 	if len(anthropicReq.Tools) > 0 {
 		openaiReq.Tools = t.transformTools(anthropicReq.Tools)
+		// Tool markers stay only for DeepSeek: Alibaba documents markers on
+		// system/message content, not on tool definitions.
 		if !isDeepSeekModel(model.ModelID) {
 			for i := range openaiReq.Tools {
 				openaiReq.Tools[i].CacheControl = nil
