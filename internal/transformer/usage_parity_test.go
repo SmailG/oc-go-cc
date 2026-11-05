@@ -75,7 +75,7 @@ func usageViaStream(t *testing.T, usage json.RawMessage) types.Usage {
 	return *got
 }
 
-// TestUsageParity_StreamingAndNonStreamingAgree is the Gap 3 / Gap 2 contract:
+// TestUsageParity_StreamingAndNonStreamingAgree is the usage contract:
 // for every provider usage shape, the streaming path and both non-streaming
 // paths report the same Anthropic usage; input + cache_read + cache_creation
 // equals prompt_tokens (Anthropic counts them as disjoint); nothing is negative.
@@ -99,6 +99,9 @@ func TestUsageParity_StreamingAndNonStreamingAgree(t *testing.T) {
 		{"deepseek_wins.json", 0, 800, 200, true},
 		// A DeepSeek hit with a zero miss still counts as DeepSeek usage.
 		{"deepseek_hit_only_wins.json", 0, 1000, 0, true},
+		// A DeepSeek miss with a zero hit still counts as DeepSeek usage: the
+		// details object (cached_tokens 999) is ignored, not mixed in.
+		{"deepseek_miss_only_ignores_details.json", 800, 0, 200, true},
 		// read + creation exceed prompt_tokens: input floors at 0, never negative.
 		{"overcount.json", 0, 80, 50, false},
 	}
