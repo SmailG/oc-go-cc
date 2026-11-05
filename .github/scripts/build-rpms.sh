@@ -20,8 +20,8 @@ set -euo pipefail
 : "${VERSION:?VERSION must be set (version without the leading v)}"
 OUTDIR="${OUTDIR:-dist}"
 # setup-go v7 keeps commands on the selected repository toolchain by exporting
-# GOTOOLCHAIN=local. nfpm v2.47.0 requires Go 1.26.4, while v2.46.3 supports
-# the Go 1.25 toolchain declared in this repository's go.mod.
+# GOTOOLCHAIN=local, so the toolchain stays at go.mod's exact version (1.26.0).
+# nfpm v2.47.0 requires Go 1.26.4 and cannot build; v2.46.3 builds with 1.26.0.
 NFPM_REF="${NFPM_REF:-v2.46.3}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

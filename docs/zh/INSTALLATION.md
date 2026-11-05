@@ -129,7 +129,7 @@ docker run -d --restart unless-stopped --name routatic-proxy --env-file .env -p 
 ## 系统要求
 
 - [OpenCode Go](https://opencode.ai/auth) 订阅和 API key
-- Go 1.21+（仅从源码构建时需要）
+- Go 1.26+（仅从源码构建时需要）
 - Docker（仅 Docker 设置时需要）
 
 ## macOS GUI 版本
