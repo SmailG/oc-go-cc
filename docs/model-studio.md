@@ -40,9 +40,10 @@ Alibaba's explicit cache reads:
   (`"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]`), not as a field
   on the message. Alibaba's explicit-cache-only models (`qwen3.6-flash`, `qwen3.6-plus`) cannot cache
   without it.
-- Markers on tool definitions, on tool-result (`role: "tool"`) messages and on image parts are
-  dropped: Alibaba documents markers on message content only, and the proxy has not sent them in
-  those positions.
+- Markers on tool definitions and on tool-result (`role: "tool"`) messages are dropped. A marker on
+  an image part is never sent on the image: the request transformer already lifts the first marker
+  in a user turn to the message, so it ends up on that message's last text block, and the cached
+  prefix ends before the image.
 - The proxy never adds or infers a marker; it only keeps the ones the client sent
   (`docs/adr/0002-client-owned-cache-directives.md`).
 - This is decided by the provider, not the model: a `deepseek-*` model ID served by Model Studio
