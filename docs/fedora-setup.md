@@ -124,7 +124,7 @@ routatic-proxy --version
 
 ### Method 3: Build from Source
 
-Building from source requires Go 1.25.0 or later.
+Building from source requires Go 1.26.0 or later.
 
 #### Install Go on Fedora 44
 
@@ -136,14 +136,14 @@ sudo dnf install golang
 go version
 ```
 
-If the dnf version is older than 1.25.0, install Go manually:
+If the dnf version is older than 1.26.0, install Go manually:
 
 ```bash
-# Download Go 1.25 (or latest)
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+# Download Go 1.26 (or latest)
+wget https://go.dev/dl/go1.26.0.linux-amd64.tar.gz
 
 # Extract to /usr/local
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.26.0.linux-amd64.tar.gz
 
 # Add to PATH (add to ~/.bashrc for persistence)
 export PATH=$PATH:/usr/local/go/bin

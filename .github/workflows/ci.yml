@@ -52,6 +52,22 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Nothing here builds the Dockerfile, and Dependabot has no docker
+      # ecosystem, so a go.mod bump would otherwise only break the image build
+      # in the release workflows after merge. A newer image tag is fine.
+      - name: Dockerfile Go image is not older than go.mod
+        run: |
+          gomod=$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' go.mod | head -n1)
+          image=$(sed -n 's/^FROM golang:\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' Dockerfile | head -n1)
+          if [ -z "$gomod" ] || [ -z "$image" ]; then
+            echo "::error::could not read Go versions (go.mod='$gomod', Dockerfile='$image')"
+            exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$gomod" "$image" | sort -V | tail -n1)" != "$image" ]; then
+            echo "::error file=Dockerfile::golang:$image is older than go.mod's go $gomod; bump the Dockerfile FROM line"
+            exit 1
+          fi
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:

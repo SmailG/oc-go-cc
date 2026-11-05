@@ -144,7 +144,7 @@ docker run -d --restart unless-stopped --name routatic-proxy --env-file .env -p 
 ## Requirements
 
 - An [OpenCode Go](https://opencode.ai/auth) subscription and API key
-- Go 1.21+ (only needed if building from source)
+- Go 1.26+ (only needed if building from source)
 - Docker (only needed for Docker setup)
 
 ## Updating

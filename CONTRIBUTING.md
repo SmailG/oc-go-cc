@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Go](https://go.dev/dl/) 1.25.0 or later
+- [Go](https://go.dev/dl/) 1.26.0 or later
 - [Git](https://git-scm.com/)
 - [Make](https://www.gnu.org/software/make/) (build automation)
 
