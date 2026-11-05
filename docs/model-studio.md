@@ -32,8 +32,8 @@ The passthrough is asymmetric, and worth being precise about:
 ### Prompt caching on the Chat Completions path
 
 On the Anthropic path (`anthropic_base_url`) the request goes through with its `cache_control`
-markers intact. On the Chat Completions path the proxy forwards every marker the client sent, in
-the form Alibaba's explicit cache reads. The rule is
+markers intact. On the Chat Completions path the proxy forwards the client's markers as sent, in
+the form Alibaba's explicit cache reads, shaped by the conversion to OpenAI messages (below). The rule is
 `docs/adr/0002-client-owned-cache-directives.md`: a directive is dropped only when the wire format
 cannot carry it or a failure has been observed, not on doubt. If Alibaba rejects a marker location,
 that will be observed and handled then. The escape hatch is the Anthropic wire format (configure
@@ -46,13 +46,25 @@ arrived. There is no separate switch.
 - A marker the client put on a content part (an image, for example) stays on that part. A
   message-level marker goes on the **last content part of any type**: in Anthropic semantics a
   marker caches the prefix through its block, and the converted message is one unit.
+- On user turns one client marker is one wire marker. A `tool_result` marker stays on its own `role: "tool"`
+  message, an `image` marker on its image part, a `text` marker on the (joined) text part; none is
+  copied onto a block the client did not mark.
+- Adjacent text blocks of a message are joined into one text part, marker at its end. System
+  blocks are joined into one system message that carries the marker of the first marked block, so
+  `[A(cc), B, C(cc)]` becomes a single `ABC` message with one marker.
+- An assistant `tool_use` block has no carrier on the OpenAI wire, so its marker is dropped when
+  the turn has no text; when the turn has text it lands on that text part.
 - Tool definitions keep their `cache_control` field, as the Anthropic path already sends it.
-- The proxy never adds or infers a marker.
+- The proxy does not invent a marker for a block the client left unmarked.
 - Dropped because the wire format cannot carry it: a marker on a message with no content part
   (an assistant turn that is only `tool_calls`, or empty content); no empty part is invented.
 - Not Model Studio's choice: `kimi-*` models skip the system-block marker, a rule from PR #56
   ("Kimi models reject cache_control"), and a `deepseek-*` model ID served by Model Studio keeps
   the DeepSeek form (message-level marker).
+- Kimi on Model Studio: it gets no system marker (that existing skip is model-ID based and does not
+  record the provider; its only evidence is the PR #56 assertion), but every other marker is
+  forwarded as for any other model. The skip is not extended to other positions or providers. If
+  Alibaba rejects those markers for Kimi, that will be observed and handled then.
 
 Cache use is read from the reply's `usage`: `prompt_tokens_details.cached_tokens` (cache reads) and
 `prompt_tokens_details.cache_creation_input_tokens` (explicit-cache writes), both counted inside
@@ -60,6 +72,12 @@ Cache use is read from the reply's `usage`: `prompt_tokens_details.cached_tokens
 `cache_creation_input_tokens`, and `input_tokens` is what remains
 (`prompt_tokens` − reads − writes, never below 0). Streaming and non-streaming replies report the
 same numbers.
+
+Dashboard and history `input_tokens` take this same value: it means **uncached** input. Cache
+reads and cache creation are reported in the usage event but are not stored, and `est_cost_usd`
+(input tokens × the model's input price) has no cache pricing, an existing limitation. Requests
+recorded before this change on the non-streaming OpenAI path counted cached tokens as input;
+streaming DeepSeek and the Anthropic passthrough already recorded the uncached figure.
 
 > Not verified against the live API (token-plan quota exhausted): covered by unit tests on fixture
 > bodies only.
