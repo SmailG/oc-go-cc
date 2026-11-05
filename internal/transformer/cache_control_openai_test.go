@@ -277,3 +277,22 @@ func TestMoveCacheControlIntoContentPicksLastNonEmptyTextPart(t *testing.T) {
 		}
 	}
 }
+
+// Multimodal messages are the only ones whose markers live on content parts.
+func TestOtherProvidersStripMarkersFromMultimodalParts(t *testing.T) {
+	req := &types.MessageRequest{
+		Model:     "claude-sonnet-5",
+		MaxTokens: 10,
+		Messages: []types.Message{{Role: "user", Content: json.RawMessage(`[
+			{"type":"text","text":"look","cache_control":` + ephemeralJSON + `},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"},"cache_control":` + ephemeralJSON + `}
+		]`)}},
+	}
+	raw, decoded := wireJSON(t, req, config.ModelConfig{ModelID: "glm-5", Provider: config.ProviderOpenCodeGo, Vision: true})
+	if parts := contentParts(t, wireMessages(t, decoded)[0]); len(parts) != 2 {
+		t.Fatalf("parts = %v, want text and image_url", parts)
+	}
+	if strings.Contains(raw, "cache_control") {
+		t.Fatalf("cache_control leaked on a multimodal part: %s", raw)
+	}
+}
