@@ -1,0 +1,1 @@
+{"id":"chatcmpl-nc","object":"chat.completion","created":1,"model":"glm-5","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020}}

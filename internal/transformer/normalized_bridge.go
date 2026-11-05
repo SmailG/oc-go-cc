@@ -228,11 +228,14 @@ func OpenAIResponseToNormalized(openaiResp *types.ChatCompletionResponse, modelI
 
 	// Map usage. UsageInfo is a value type; check if it was populated.
 	if openaiResp.Usage.PromptTokens > 0 || openaiResp.Usage.CompletionTokens > 0 {
+		// Same split as the streaming path: input_tokens excludes cache
+		// reads and writes (see openAIUsageToAnthropic).
+		u := openAIUsageToAnthropic(openaiResp.Usage)
 		nr.Usage = core.NormalizedUsage{
-			InputTokens:         openaiResp.Usage.PromptTokens,
-			OutputTokens:        openaiResp.Usage.CompletionTokens,
-			CacheReadTokens:     openaiResp.Usage.PromptCacheHitTokens,
-			CacheCreationTokens: openaiResp.Usage.PromptCacheMissTokens,
+			InputTokens:         u.InputTokens,
+			OutputTokens:        u.OutputTokens,
+			CacheReadTokens:     u.CacheReadInputTokens,
+			CacheCreationTokens: u.CacheCreationInputTokens,
 		}
 	}
 
