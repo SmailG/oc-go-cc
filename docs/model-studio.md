@@ -32,22 +32,27 @@ The passthrough is asymmetric, and worth being precise about:
 ### Prompt caching on the Chat Completions path
 
 On the Anthropic path (`anthropic_base_url`) the request goes through with its `cache_control`
-markers intact. On the Chat Completions path the proxy keeps them for Model Studio too, in the form
-Alibaba's explicit cache reads:
+markers intact. On the Chat Completions path the proxy forwards every marker the client sent, in
+the form Alibaba's explicit cache reads. The rule is
+`docs/adr/0002-client-owned-cache-directives.md`: a directive is dropped only when the wire format
+cannot carry it or a failure has been observed, not on doubt. If Alibaba rejects a marker location,
+that will be observed and handled then. The escape hatch is the Anthropic wire format (configure
+`anthropic_base_url`; `wire_format: "anthropic"` pins it per model), which sends the markers as they
+arrived. There is no separate switch.
 
-- A marker on the system prompt, a user message or an assistant message is written inside the
-  **last text content block** of that message
-  (`"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]`), not as a field
-  on the message. Alibaba's explicit-cache-only models (`qwen3.6-flash`, `qwen3.6-plus`) cannot cache
-  without it.
-- Markers on tool definitions and on tool-result (`role: "tool"`) messages are dropped. A marker on
-  an image part is never sent on the image: the request transformer already lifts the first marker
-  in a user turn to the message, so it ends up on that message's last text block, and the cached
-  prefix ends before the image.
-- The proxy never adds or infers a marker; it only keeps the ones the client sent
-  (`docs/adr/0002-client-owned-cache-directives.md`).
-- This is decided by the provider, not the model: a `deepseek-*` model ID served by Model Studio
-  keeps the DeepSeek form (message-level marker, tool markers kept).
+- A marker on a system, user, assistant or tool-result (`role: "tool"`) message is written inside
+  a content block (`"content":[{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}]`),
+  not as a field on the message. `qwen3.6-flash` and `qwen3.6-plus` cannot cache without it.
+- A marker the client put on a content part (an image, for example) stays on that part. A
+  message-level marker goes on the **last content part of any type**: in Anthropic semantics a
+  marker caches the prefix through its block, and the converted message is one unit.
+- Tool definitions keep their `cache_control` field, as the Anthropic path already sends it.
+- The proxy never adds or infers a marker.
+- Dropped because the wire format cannot carry it: a marker on a message with no content part
+  (an assistant turn that is only `tool_calls`, or empty content); no empty part is invented.
+- Not Model Studio's choice: `kimi-*` models skip the system-block marker, a rule from PR #56
+  ("Kimi models reject cache_control"), and a `deepseek-*` model ID served by Model Studio keeps
+  the DeepSeek form (message-level marker).
 
 Cache use is read from the reply's `usage`: `prompt_tokens_details.cached_tokens` (cache reads) and
 `prompt_tokens_details.cache_creation_input_tokens` (explicit-cache writes), both counted inside
@@ -56,7 +61,8 @@ Cache use is read from the reply's `usage`: `prompt_tokens_details.cached_tokens
 (`prompt_tokens` − reads − writes, never below 0). Streaming and non-streaming replies report the
 same numbers.
 
-> Not verified against the live API: these behaviours are covered by unit tests on fixture bodies.
+> Not verified against the live API (token-plan quota exhausted): covered by unit tests on fixture
+> bodies only.
 
 ## Quick start
 

@@ -127,7 +127,7 @@ Claude Code sends Anthropic Messages API format. The proxy transforms to the pro
 - Anthropic `thinking` blocks ↔ OpenAI `reasoning_content` preservation
 - DeepSeek system message rewriting to prevent prefix cache invalidation
 - Image blocks: base64 data URL for vision models, `[Image]` placeholder for non-vision
-- `cache_control` on the Chat Completions path: DeepSeek models keep the message-level and tool markers; Model Studio keeps markers on system/user/assistant messages, moved inside the last text content block, and drops them from tool definitions and tool-role messages; every other provider has them stripped
+- `cache_control` on the Chat Completions path follows `docs/adr/0002-client-owned-cache-directives.md` (drop only when the wire format cannot carry it or a failure was observed): Model Studio forwards every marker the client sent (system/user/assistant/tool-result messages inside a content block, tool definitions as a field, part-level markers where they were); DeepSeek keeps the message-level and tool markers; every other provider has them stripped because some reject them (`LEARNINGS.md`)
 - Chat Completions `usage` → Anthropic usage is computed in one place (`openAIUsageToAnthropic`): `input_tokens` excludes cache reads and writes, so input + cache_read + cache_creation = `prompt_tokens`, for streaming and non-streaming alike. DeepSeek `prompt_cache_hit/miss_tokens` and the OpenAI-standard `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` are both read
 
 ## Fallback & Circuit Breaker
