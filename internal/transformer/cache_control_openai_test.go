@@ -230,3 +230,50 @@ func TestModelStudioMarkerSurvivesNormalizedPath(t *testing.T) {
 		t.Fatalf("system block marker missing from normalized-path body:\n%s", raw)
 	}
 }
+
+func TestModelStudioLeavesUnmarkedMessagesAlone(t *testing.T) {
+	req := &types.MessageRequest{
+		Model:     "claude-sonnet-5",
+		MaxTokens: 10,
+		System:    json.RawMessage(`"plain system"`),
+		Messages: []types.Message{
+			{Role: "user", Content: json.RawMessage(`"plain user"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"plain assistant"}]`)},
+		},
+	}
+	raw, decoded := wireJSON(t, req, config.ModelConfig{ModelID: "qwen3.6-flash", Provider: config.ProviderModelStudio})
+	for i, m := range wireMessages(t, decoded) {
+		if _, ok := m["content"].(string); !ok {
+			t.Errorf("message %d content = %v, want the unchanged plain string", i, m["content"])
+		}
+	}
+	if strings.Contains(raw, "cache_control") {
+		t.Errorf("a cache_control appeared from nowhere: %s", raw)
+	}
+}
+
+// A request built by TransformRequest has at most one text part per message, so
+// the "last non-empty text part" rule is pinned directly.
+func TestMoveCacheControlIntoContentPicksLastNonEmptyTextPart(t *testing.T) {
+	marker := &types.CacheControl{Type: "ephemeral"}
+	content, _ := json.Marshal([]types.ChatContentPart{
+		{Type: "text", Text: "first", CacheControl: marker},
+		{Type: "text", Text: "second"},
+		{Type: "text", Text: ""},
+		{Type: "image_url", ImageURL: &types.ImageURL{URL: "data:image/png;base64,abc"}},
+	})
+	msgs := []types.ChatMessage{{Role: "user", Content: content}}
+
+	moveCacheControlIntoContent(msgs)
+
+	var parts []types.ChatContentPart
+	if err := json.Unmarshal(msgs[0].Content, &parts); err != nil {
+		t.Fatalf("content is not an array: %v", err)
+	}
+	for i, p := range parts {
+		wantMarker := i == 1
+		if (p.CacheControl != nil) != wantMarker {
+			t.Errorf("part %d (%q) marker = %v, want marker=%v", i, p.Text, p.CacheControl, wantMarker)
+		}
+	}
+}
