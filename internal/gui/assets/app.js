@@ -1564,7 +1564,12 @@ const LogPanel = {
     es.onerror = () => {
       this.setState(t('logs.down'), 'down');
       if (es.readyState === EventSource.CLOSED) {
-        this.es = null;
+        // A late error from a superseded stream must not orphan the current one:
+        // attach() starts with detach(), so this handler can run after a newer
+        // stream replaced it.
+        if (this.es === es) {
+          this.es = null;
+        }
         return;
       }
       // EventSource retries by itself; give up after a few failures so a 503
@@ -1572,7 +1577,9 @@ const LogPanel = {
       failures += 1;
       if (failures >= 3) {
         es.close();
-        this.es = null;
+        if (this.es === es) {
+          this.es = null;
+        }
       }
     };
     this.es = es;
