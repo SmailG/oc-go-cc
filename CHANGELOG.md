@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking Changes
+- The dashboard API rejects requests that do not come from the dashboard itself. Every `/api/*` request must carry a loopback `Host` at the GUI's port (blocks DNS rebinding), and mutating requests must carry an `Origin` matching that origin. Scripts that POST to the dashboard, e.g. `curl -XPOST http://127.0.0.1:3445/api/proxy/config`, now need `-H 'Origin: http://127.0.0.1:3445'`; `GET` calls only need the loopback Host
+
 ### Added
 - Model Studio provider (`model-studio`) for Alibaba Cloud Model Studio / Bailian / DashScope, including the Token Plan gateway. Registered in the provider registry, with its own `model_studio` config block, `ROUTATIC_PROXY_MODEL_STUDIO_API_KEY` / `_API_KEYS` / `_URL` env overrides, `routatic-proxy init --provider model-studio` preset, and `configs/config.token-plan.json`
 - Model Studio serves two wire formats: the native Anthropic endpoint (`anthropic_base_url`, which Token Plan exposes at `/apps/anthropic`) and OpenAI Chat Completions (`base_url`). Anthropic is preferred whenever it is configured — the request and response pass through untransformed, so tool use, `thinking` blocks and `cache_control` survive instead of making a lossy round trip. Opt out per model with `wire_format: "openai"` or `anthropic_tools_disabled`
@@ -21,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `jev_routing` never sees a request matched by `model_overrides` / `model_family_overrides` (the fallback chain behind an override is built without Jev); redirects from the TypeSafe API are not followed; `base_url` must be `https` unless loopback; text over 64 KB is not classified
 - `jev_routing` also removes slash-command echoes (`<command-name>`, `<command-message>`, `<command-args>`, `<local-command-*>`) and tool-call echo blocks before the 600-character cut; stripping is a single linear pass
 - A startup notice is printed when `jev_routing` is enabled, saying the latest user message is sent to TypeSafe
-- Dashboard config export no longer redacts `jev_routing.api_key_env` (a variable name, not a secret), and config import validates `jev_routing` before it replaces the file on disk
+- Dashboard config export no longer redacts `jev_routing.api_key_env` (a variable name, not a secret), and config import runs the full loader over the staged document before it replaces the file on disk, so a rejected key or URL cannot leave an unbootable config; the `jev_routing` check is retained because a disabled block is skipped by the loader
 
 ### Fixed
 - Non-streaming Chat Completions replies through the providers (OpenCode Go/Zen, Bedrock, Model Studio) reported `input_tokens` = `prompt_tokens` with the cache counts added on top, so a DeepSeek reply with 800 cache-hit and 200 cache-miss tokens of 1000 prompt tokens showed 2000 input-side tokens (1000 + 800 + 200), while streaming showed 1000. Both now report `input_tokens` = `prompt_tokens` − cache reads − cache writes, through one shared function

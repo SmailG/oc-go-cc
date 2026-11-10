@@ -113,12 +113,14 @@ func openRegular(path string) (*os.File, os.FileInfo, error) {
 	return f, st, nil
 }
 
-// tailFile reads the last limitBytes of path. A partial leading line is dropped
-// when the window starts mid-file, so the caller only ever sees complete lines.
-func tailFile(path string, limitBytes int64) (lines []string, truncated bool, err error) {
+// tailFile reads the last limitBytes of path and returns them with the FileInfo
+// of the same open file, so a caller never has to re-stat the path and describe
+// a different file after a rotation. A partial leading line is dropped when the
+// window starts mid-file, so the caller only ever sees complete lines.
+func tailFile(path string, limitBytes int64) (lines []string, truncated bool, st os.FileInfo, err error) {
 	f, st, err := openRegular(path)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -130,14 +132,14 @@ func tailFile(path string, limitBytes int64) (lines []string, truncated bool, er
 	}
 	buf := make([]byte, size-start)
 	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 
 	lines = splitLogLines(buf, truncated)
 	if len(lines) > logMaxLines {
 		lines = lines[len(lines)-logMaxLines:]
 	}
-	return lines, truncated, nil
+	return lines, truncated, st, nil
 }
 
 // splitLogLines turns a byte window into log lines, discarding the leading
@@ -213,16 +215,17 @@ func (s *Server) handleConfigOpen(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("config file not found: %s", path), http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logInternal("stating config file", err)
+		http.Error(w, "could not read the config file", http.StatusInternalServerError)
 		return
 	}
-
 	// The launcher is a third-party binary: `xdg-open` can wait for the launched
 	// application to exit, so the request must not outlive a timeout.
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	if err := runOpener(ctx, path); err != nil {
-		http.Error(w, fmt.Sprintf("failed to open %s: %v", path, err), http.StatusInternalServerError)
+		s.logInternal("opening config file", err)
+		http.Error(w, "could not open the config file", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]string{"path": path})
@@ -237,7 +240,8 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	path, err := logFilePath()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logInternal("resolving log path", err)
+		http.Error(w, "could not resolve the log file", http.StatusInternalServerError)
 		return
 	}
 
@@ -246,7 +250,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		"lines":     []string{},
 		"truncated": false,
 	}
-	lines, truncated, err := tailFile(path, logTailBytes)
+	lines, truncated, st, err := tailFile(path, logTailBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// Not an error: the proxy may be running in a terminal, where stdout
@@ -255,15 +259,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, resp)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logInternal("reading log tail", err)
+		http.Error(w, "could not read the log file", http.StatusInternalServerError)
 		return
 	}
 
-	st, err := os.Stat(path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	resp["exists"] = true
 	resp["lines"] = lines
 	resp["truncated"] = truncated
@@ -294,7 +294,8 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 
 	path, err := logFilePath()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logInternal("resolving log path", err)
+		http.Error(w, "could not resolve the log file", http.StatusInternalServerError)
 		return
 	}
 	f, st, err := openRegular(path)
@@ -305,7 +306,8 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errNotRegular):
 			http.Error(w, fmt.Sprintf("%s is not a regular file", path), http.StatusUnsupportedMediaType)
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.logInternal("opening log file", err)
+			http.Error(w, "could not open the log file", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -391,7 +393,8 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 			n, err := f.ReadAt(chunk, offset)
 			if n <= 0 {
 				if err != nil && err != io.EOF {
-					sseEvent(w, flusher, "error", err.Error())
+					s.logInternal("reading log file", err)
+					sseEvent(w, flusher, "error", "could not read the log file")
 					return
 				}
 				continue

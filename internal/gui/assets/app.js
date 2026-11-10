@@ -1467,8 +1467,8 @@ const LogPanel = {
         if (this.es) {
           this.setState(t('logs.live'), 'live');
         } else {
-          // No stream is open (closed, failed, or never attached): reattach.
-          // from=end cannot replay the gap, so repaint from the tail first.
+          // No stream is open (closed, failed, or never attached): repaint from
+          // the tail, then attach.
           document.getElementById('log-view').replaceChildren();
           this.pending = [];
           this.load();
@@ -1543,7 +1543,11 @@ const LogPanel = {
     // The stream starts at EOF: load() already rendered the window, so replaying
     // it would duplicate the tail.
     const es = new EventSource('/api/logs/stream');
-    es.addEventListener('open', () => this.setState(t('logs.live'), 'live'));
+    let failures = 0;
+    es.addEventListener('open', () => {
+      failures = 0;
+      this.setState(t('logs.live'), 'live');
+    });
     es.addEventListener('line', e => this.receive(parseSSEData(e.data)));
     es.addEventListener('rotate', () => {
       if (this.follow) {
@@ -1560,6 +1564,14 @@ const LogPanel = {
     es.onerror = () => {
       this.setState(t('logs.down'), 'down');
       if (es.readyState === EventSource.CLOSED) {
+        this.es = null;
+        return;
+      }
+      // EventSource retries by itself; give up after a few failures so a 503
+      // from the follower cap or an unreachable server cannot loop forever.
+      failures += 1;
+      if (failures >= 3) {
+        es.close();
         this.es = null;
       }
     };

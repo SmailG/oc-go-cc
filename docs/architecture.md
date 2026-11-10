@@ -192,7 +192,7 @@ The macOS GUI (`routatic-proxy ui`) runs the proxy and a dashboard in a single p
 ### Key Design Decisions
 
 - **Single process**: The proxy and GUI share the same process, so History and Metrics instances are passed by reference — no IPC or shared memory needed.
-- **Localhost-only GUI server**: The dashboard HTTP server binds to `127.0.0.1:0` (random available port), so only local processes can reach it.
+- **Localhost-only GUI server**: The dashboard HTTP server binds to `127.0.0.1` (port 3445 by default, the next free port if it is taken), so only local processes can reach it. A request guard additionally requires every request to carry a loopback `Host` at that port, which blocks DNS rebinding, and requires a matching `Origin` on mutating requests.
 - **Security headers**: All GUI server responses include `X-Content-Type-Options: nosniff` and `Content-Security-Policy` headers.
 - **Partial config saves**: The Settings tab sends only changed fields as a JSON patch. The backend reads the current config from disk, merges the patch, and writes back — unchanged fields are preserved.
 - **Nil-safe handlers**: The `/api/metrics` and `/api/history` endpoints handle nil dependencies gracefully (return zero values instead of panicking).
@@ -207,6 +207,16 @@ The macOS GUI (`routatic-proxy ui`) runs the proxy and a dashboard in a single p
 | `/api/proxy/config` | GET/POST | Full proxy configuration (partial merge on POST) |
 | `/api/proxy/start` | POST | Start the proxy server |
 | `/api/proxy/stop` | POST | Stop the proxy server |
+
+Every `/api/*` request must carry a loopback `Host` at the dashboard's port. Requests that mutate state (`POST`, `PUT`, `PATCH`, `DELETE`) must also send an `Origin` header naming that same origin, because browsers always send it and a cross-site page cannot forge it. Non-browser clients therefore need it explicitly:
+
+```bash
+curl -XPOST -H 'Origin: http://127.0.0.1:3445' \
+  -H 'Content-Type: application/json' \
+  --data '{"hot_reload":true}' http://127.0.0.1:3445/api/proxy/config
+```
+
+`GET` requests need no `Origin`; the Host check applies to them too.
 
 ### Config Editing
 

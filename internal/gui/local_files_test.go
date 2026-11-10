@@ -328,8 +328,9 @@ func TestHandleLogStream_StartsAtEOF(t *testing.T) {
 // pointing at the old inode, so only a path comparison can notice the swap.
 func TestHandleLogStream_ReopensAfterRename(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Go opens files there without FILE_SHARE_DELETE, so the rename fails
-		// while the stream holds the old handle; Windows rotation is copytruncate.
+		// os.SameFile itself works on Windows (volume + file index), but Go opens
+		// files without FILE_SHARE_DELETE, so the rename fails while the stream
+		// holds the old handle; Windows rotation is copytruncate (covered above).
 		t.Skip("cannot rename an open log file on Windows")
 	}
 	old := logPollInterval
@@ -371,7 +372,8 @@ func TestHandleLogStream_ReopensAfterRename(t *testing.T) {
 	}
 }
 
-// A directory is not a log; opening it must fail before streaming starts.
+// A directory is not a log; opening it must fail before streaming starts, and
+// the 5xx body must not echo the filesystem path.
 func TestHandleLogs_RejectsNonRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(LogFileEnvVar, dir)
@@ -380,5 +382,8 @@ func TestHandleLogs_RejectsNonRegularFile(t *testing.T) {
 	s.handleLogs(rec, httptest.NewRequest(http.MethodGet, "/api/logs", nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 for a non-regular log path", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), dir) {
+		t.Errorf("the response leaked the log path: %s", rec.Body.String())
 	}
 }

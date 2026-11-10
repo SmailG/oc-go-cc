@@ -447,7 +447,8 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		// replace (at any depth) and unknown keys survive the save.
 		data, err := mergeConfigPatch(path, patch)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.logInternal("merging config patch", err)
+			http.Error(w, "could not apply the config patch", http.StatusInternalServerError)
 			return
 		}
 
@@ -457,7 +458,8 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		// patch used to leave an unbootable file on disk when Reload failed.
 		tmp, err := writeTempConfig(path, data)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.logInternal("staging config", err)
+			http.Error(w, "could not stage the config", http.StatusInternalServerError)
 			return
 		}
 		defer func() { _ = os.Remove(tmp) }()
@@ -487,13 +489,15 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 
 		// Atomic replace: the validated document becomes config.json in one rename.
 		if err := os.Rename(tmp, path); err != nil {
-			http.Error(w, fmt.Sprintf("failed to replace config file: %v", err), http.StatusInternalServerError)
+			s.logInternal("replacing config file", err)
+			http.Error(w, "could not replace the config file", http.StatusInternalServerError)
 			return
 		}
 
 		// Reload configuration atomically so the running proxy picks up changes.
 		if err := s.atomicCfg.Reload(); err != nil {
-			http.Error(w, fmt.Sprintf("failed to reload config: %v", err), http.StatusInternalServerError)
+			s.logInternal("reloading config", err)
+			http.Error(w, "could not reload the config", http.StatusInternalServerError)
 			return
 		}
 

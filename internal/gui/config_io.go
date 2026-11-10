@@ -138,30 +138,54 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Apply {
-		// Validate before touching the file: Reload would reject a bad block only
-		// after it had already replaced a working config on disk.
-		if err := config.CheckJevRouting(cfg.JevRouting); err != nil {
-			http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
+		configPath := s.atomicCfg.Path()
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			s.logInternal("marshalling imported config", err)
+			http.Error(w, "could not encode the config", http.StatusInternalServerError)
 			return
 		}
+
 		// Shared with the partial-update endpoint so an import cannot interleave
 		// with a save's read-merge-write sequence.
 		s.configMu.Lock()
 		defer s.configMu.Unlock()
 
-		configPath := s.atomicCfg.Path()
-		data, err := json.MarshalIndent(cfg, "", "  ")
+		// Same sequence as the patch endpoint: validate the exact document the
+		// loader would read, then swap it in atomically. Reload alone validates
+		// too late — config.json has already been replaced by then, so a rejected
+		// key or URL would leave an unbootable file on disk.
+		tmp, err := writeTempConfig(configPath, data)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to marshal config: %v", err), http.StatusInternalServerError)
+			s.logInternal("staging imported config", err)
+			http.Error(w, "could not stage the config", http.StatusInternalServerError)
 			return
 		}
-		if err := writeFileAtomic(configPath, data, 0600); err != nil {
-			http.Error(w, fmt.Sprintf("failed to write config: %v", err), http.StatusInternalServerError)
+		defer func() { _ = os.Remove(tmp) }()
+
+		merged, err := config.LoadFromPath(tmp)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("config rejected: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// A disabled jev_routing block is inert and skipped by the loader, so the
+		// block this import just enabled may be one the loader would reject.
+		if err := config.CheckJevRouting(merged.JevRouting); err != nil {
+			http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Atomic replace: the validated document becomes config.json in one rename.
+		if err := os.Rename(tmp, configPath); err != nil {
+			s.logInternal("replacing config file", err)
+			http.Error(w, "could not replace the config file", http.StatusInternalServerError)
 			return
 		}
 
 		if err := s.atomicCfg.Reload(); err != nil {
-			http.Error(w, fmt.Sprintf("failed to reload config: %v", err), http.StatusInternalServerError)
+			s.logInternal("reloading config", err)
+			http.Error(w, "could not reload the config", http.StatusInternalServerError)
 			return
 		}
 
@@ -169,13 +193,4 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, resp)
-}
-
-// writeFileAtomic writes data beside path and renames it into place.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
