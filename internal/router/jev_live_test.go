@@ -36,7 +36,7 @@ func TestJevLive_LabelledCases(t *testing.T) {
 		TimeoutMs: 5000, APIKeyEnv: keyEnv, BaseURL: "https://api.typesafe.ai",
 	}
 	if jcfg.Model == "" {
-		jcfg.Model = "jev-1.13.0"
+		jcfg.Model = "jev-1.14.0"
 	}
 	var rt jevRuntime
 	rt.init()

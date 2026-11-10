@@ -36,8 +36,8 @@ func TestJevRouting_DefaultsWhenBlockAbsent(t *testing.T) {
 	if j.Mode != JevModeActive {
 		t.Errorf("Mode = %q, want %q", j.Mode, JevModeActive)
 	}
-	if j.Model != "jev-1.13.0" {
-		t.Errorf("Model = %q, want jev-1.13.0", j.Model)
+	if j.Model != "jev-1.14.0" {
+		t.Errorf("Model = %q, want jev-1.14.0", j.Model)
 	}
 	if j.TimeoutMs != 800 {
 		t.Errorf("TimeoutMs = %d, want 800", j.TimeoutMs)

@@ -57,6 +57,8 @@ GUI API (localhost only):
 - `GET /api/history` — Last 200 request records
 - `GET/POST /api/proxy/config` — Full proxy configuration
 
+Requests to the GUI API must carry a loopback `Host` at the GUI port; mutating requests (`POST`/`PUT`/`PATCH`/`DELETE`) also need an `Origin` matching the dashboard, e.g. `-H 'Origin: http://127.0.0.1:3445'`. Plain `GET` calls need only the Host.
+
 ## Building and Running
 
 ```bash

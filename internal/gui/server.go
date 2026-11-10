@@ -59,6 +59,10 @@ type Server struct {
 	srv               *http.Server
 	logger            *slog.Logger
 	catalogMu         sync.Mutex
+	// configMu serializes config read-merge-write-reload sequences. The write is
+	// atomic, but two concurrent saves could read the same file and the last
+	// rename would discard the other patch.
+	configMu sync.Mutex
 
 	storage *storage.Database
 }
@@ -183,6 +187,11 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 
 	mux.HandleFunc("/api/config/export", s.handleConfigExport)
 	mux.HandleFunc("/api/config/import", s.handleConfigImport)
+	mux.HandleFunc("/api/config/open", s.handleConfigOpen)
+	mux.HandleFunc("/api/config/path", s.handleConfigPath)
+	mux.HandleFunc("/api/config/env", s.handleConfigEnv)
+	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.HandleFunc("/api/logs/stream", s.handleLogStream)
 	mux.HandleFunc("/api/perf/models", s.handlePerformance)
 	mux.HandleFunc("/api/perf/aggregate", s.handlePerformanceAggregate)
 	mux.HandleFunc("/api/catalog/stats", s.handleCatalogStats)
@@ -212,8 +221,16 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("gui server listen: no available port in range %d-%d", startPort, startPort+9)
 	}
 
-	// Wrap with security headers middleware.
-	s.srv = &http.Server{Handler: securityHeadersMiddleware(mux)}
+	// Wrap with security headers middleware. The request guard runs inside it so
+	// every request — static assets and API alike — is checked against the
+	// dashboard's loopback host before it is routed.
+	s.srv = &http.Server{
+		Handler: securityHeadersMiddleware(requestGuardMiddleware(int(s.guiPort.Load()), mux)),
+		// Bound slow clients, including a stalled request body. WriteTimeout
+		// stays unset because /api/logs/stream is a long-lived response.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+	}
 	go func() {
 		if srvErr := s.srv.Serve(ln); srvErr != nil && srvErr != http.ErrServerClosed {
 			s.logger.Error("gui server error", "err", srvErr)
@@ -252,6 +269,7 @@ type metricsResponse struct {
 	ModelCounts       map[string]int64 `json:"model_counts"`
 }
 
+// handleMetrics serves the live in-process request counters.
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	var snap metrics.Snapshot
 	if s.met != nil {
@@ -285,6 +303,7 @@ type historyEntry struct {
 	ErrorMsg     string `json:"error_msg,omitempty"`
 }
 
+// handleHistory serves the last 200 requests from the in-memory ring buffer.
 func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
 	if s.hist == nil {
 		writeJSON(w, []historyEntry{})
@@ -310,6 +329,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
+// handleConfig reads and updates the GUI runtime settings (autostart, notifications).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -347,6 +367,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleProxyStart starts the managed proxy process.
 func (s *Server) handleProxyStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -365,6 +386,7 @@ func (s *Server) handleProxyStart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleProxyStop stops the managed proxy process.
 func (s *Server) handleProxyStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -383,6 +405,7 @@ func (s *Server) handleProxyStop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleProxyConfig returns the live config and applies partial updates to it.
 func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 	if s.atomicCfg == nil {
 		http.Error(w, "proxy config not available", http.StatusServiceUnavailable)
@@ -395,56 +418,86 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, cfg)
 
 	case http.MethodPost:
-		// Read the current config from disk as the baseline.
-		configPath := s.atomicCfg.Path()
-		currentCfg, err := config.LoadFromPath(configPath)
+		// Read and decode the body before taking the config lock: a client that
+		// stalls mid-body must not block other saves or imports.
+		r.Body = http.MaxBytesReader(w, r.Body, maxConfigPatchBytes)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read current config: %v", err), http.StatusInternalServerError)
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "config patch too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, fmt.Sprintf("failed to read config patch: %v", err), http.StatusBadRequest)
 			return
 		}
-
-		// Decode only the fields the client sent (partial update).
-		var patch map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		var patch map[string]any
+		if err := decodeJSONMap(body, &patch); err != nil {
 			http.Error(w, fmt.Sprintf("invalid config format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		// Apply each patch field onto the current config.
-		patchBytes, err := json.Marshal(patch)
+		// From here the sequence reads config.json, so serialize it with other
+		// saves and imports.
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+
+		path := s.atomicCfg.Path()
+		// Merge onto the file as stored, so ${VAR} references the patch did not
+		// replace (at any depth) and unknown keys survive the save.
+		data, err := mergeConfigPatch(path, patch)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to re-encode patch: %v", err), http.StatusInternalServerError)
+			s.logInternal("merging config patch", err)
+			http.Error(w, "could not apply the config patch", http.StatusInternalServerError)
 			return
 		}
-		if err := json.Unmarshal(patchBytes, currentCfg); err != nil {
-			http.Error(w, fmt.Sprintf("failed to apply patch: %v", err), http.StatusInternalServerError)
+
+		// Validate the merged document with the real loader before it can replace
+		// config.json: every loader check (API keys, URLs, extra_body, model
+		// overrides, ...) must pass, not just the ones checked here. A rejected
+		// patch used to leave an unbootable file on disk when Reload failed.
+		tmp, err := writeTempConfig(path, data)
+		if err != nil {
+			s.logInternal("staging config", err)
+			http.Error(w, "could not stage the config", http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = os.Remove(tmp) }()
+
+		merged, err := config.LoadFromPath(tmp)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("config rejected: %v", err), http.StatusBadRequest)
 			return
 		}
 
 		// Validate essential fields.
-		if currentCfg.Host == "" {
+		if merged.Host == "" {
 			http.Error(w, "host is required", http.StatusBadRequest)
 			return
 		}
-		if currentCfg.Port < 1 || currentCfg.Port > 65535 {
+		if merged.Port < 1 || merged.Port > 65535 {
 			http.Error(w, "port must be between 1 and 65535", http.StatusBadRequest)
 			return
 		}
 
-		// Serialize and write the merged config.
-		data, err := json.MarshalIndent(currentCfg, "", "  ")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to serialize config: %v", err), http.StatusInternalServerError)
+		// A disabled jev_routing block is inert and skipped by the loader, so the
+		// block this patch just enabled may be one the loader would reject.
+		if err := config.CheckJevRouting(merged.JevRouting); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := os.WriteFile(configPath, data, 0600); err != nil {
-			http.Error(w, fmt.Sprintf("failed to write config file: %v", err), http.StatusInternalServerError)
+
+		// Atomic replace: the validated document becomes config.json in one rename.
+		if err := os.Rename(tmp, path); err != nil {
+			s.logInternal("replacing config file", err)
+			http.Error(w, "could not replace the config file", http.StatusInternalServerError)
 			return
 		}
 
 		// Reload configuration atomically so the running proxy picks up changes.
 		if err := s.atomicCfg.Reload(); err != nil {
-			http.Error(w, fmt.Sprintf("failed to reload config: %v", err), http.StatusInternalServerError)
+			s.logInternal("reloading config", err)
+			http.Error(w, "could not reload the config", http.StatusInternalServerError)
 			return
 		}
 
@@ -465,6 +518,10 @@ type catalogLockResponse struct {
 }
 
 const maxTestRequestBody = 1 << 20
+
+// maxConfigPatchBytes bounds the partial config update body. The dashboard sends
+// a handful of changed fields, so anything larger is a mistake or an abuse.
+const maxConfigPatchBytes = 1 << 20
 
 // handleTestSend proxies a chat request to the proxy server and streams the
 // response back. This avoids CORS issues that would arise from the browser
@@ -521,6 +578,7 @@ func (s *Server) handleTestSend(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCatalogLock reports the on-disk catalog's sync metadata.
 func (s *Server) handleCatalogLock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -545,6 +603,7 @@ func (s *Server) handleCatalogLock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// handleCatalogSync refreshes the catalog from its configured source.
 func (s *Server) handleCatalogSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -577,6 +636,7 @@ func (s *Server) handleCatalogSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCatalogStats serves catalog size and provider metrics.
 func (s *Server) handleCatalogStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -652,9 +712,18 @@ func (s *Server) handleCatalogStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// writeJSON encodes v as a JSON response.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// logInternal records a handler's internal failure without echoing filesystem
+// paths or parser detail to the client.
+func (s *Server) logInternal(msg string, err error) {
+	if s.logger != nil {
+		s.logger.Error(msg, "err", err)
+	}
 }
 
 // ensurePortAvailable checks if an existing routatic-proxy GUI is running on

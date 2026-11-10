@@ -16,7 +16,7 @@ const (
 )
 
 const (
-	defaultJevModel     = "jev-1.13.0"
+	defaultJevModel     = "jev-1.14.0"
 	defaultJevTimeoutMs = 800
 	// maxJevTimeoutMs caps timeout_ms: in active mode the request waits for Jev
 	// up to this long, so a typo like 30000 must not stall every request.

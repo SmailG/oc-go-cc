@@ -24,7 +24,7 @@ func jevOverrideStub(t *testing.T, delay time.Duration) (*httptest.Server, *atom
 		hits.Add(1)
 		time.Sleep(delay)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"model":"jev-1.13.0","answers":{
+		_, _ = fmt.Fprint(w, `{"model":"jev-1.14.0","answers":{
 			"action":{"type":"score","score":2,"confidence":0.9,"probabilities":{"0":0.1,"1":0.2,"2":0.7}},
 			"architecture":{"type":"noul","noul":0.9}},"usage":{"input_tokens":10,"output_tokens":4}}`)
 	}))
@@ -50,7 +50,7 @@ func jevOverrideHandler(t *testing.T, baseURL, mode string) *MessagesHandler {
 		ModelOverrides:       map[string]config.ModelConfig{"exact-model": {Provider: "opencode-go", ModelID: "ov-exact"}},
 		ModelFamilyOverrides: map[string]config.ModelConfig{"opus": {Provider: "opencode-go", ModelID: "ov-family"}},
 		JevRouting: config.JevRoutingConfig{
-			Enabled: true, Mode: mode, Model: "jev-1.13.0", TimeoutMs: 2000,
+			Enabled: true, Mode: mode, Model: "jev-1.14.0", TimeoutMs: 2000,
 			APIKeyEnv: jevOverrideTestKeyEnv, BaseURL: baseURL,
 		},
 	})

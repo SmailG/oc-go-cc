@@ -90,6 +90,9 @@ input:checked + .toggle-slider::before { transform: translateX(18px); }
 .save-status { margin-top: 10px; font-size: 12px; text-align: center; }
 .save-status.success { color: #30d158; }
 .save-status.error { color: #ff453a; }
+/* The Open Config result sits directly under its controls in the Backup card,
+   right-aligned with them, so it cannot be read as an Export message. */
+#open-config-status { text-align: right; margin-top: 4px; min-height: 14px; }
 
 /* ── Tab System ───────────────────────────────────────────── */
 .tab.active { color: #6366f1; background: #2c2c2e; border-bottom: 2px solid #6366f1; font-weight: 500; }
@@ -115,6 +118,7 @@ input:checked + .toggle-slider::before { transform: translateX(18px); }
 .btn-primary.btn-small:hover { background: #4f46e5; border-color: #4f46e5; }
 
 /* ── Form Helpers ─────────────────────────────────────────── */
+.checkbox-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
 .checkbox-group label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #f5f5f7; font-weight: 400; }
 .checkbox-group input[type="checkbox"] { margin: 0; }
 .checkbox-inline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #98989d; cursor: pointer; }
@@ -162,6 +166,25 @@ input:checked + .toggle-slider::before { transform: translateX(18px); }
 /* ── Test History Hint (JS-generated spans) ───────────────── */
 .test-history-hint span { padding: 2px 6px; background: #3a3a3c; border-radius: 4px; font-size: 11px; color: #98989d; cursor: pointer; transition: opacity 0.15s; }
 .test-history-hint span:hover { opacity: 1; background: #48484a; }
+
+/* ── Field Hints ──────────────────────────────────────────── */
+.field-hint { font-size: 10px; line-height: 1.5; color: #98989d; margin-top: 3px; }
+.field-hint.ok { color: #30d158; }
+.field-hint.missing { color: #ff9f0a; }
+
+/* ── Log Stream ───────────────────────────────────────────── */
+.log-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #48484a; font-size: 11px; color: #98989d; }
+.log-meta span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-meta-state { flex-shrink: 0; }
+.log-meta-state.live { color: #30d158; }
+.log-meta-state.down { color: #ff453a; }
+.log-body { padding: 0; }
+.log-view { margin: 0; height: 60vh; overflow: auto; padding: 10px 14px; background: #1c1c1e; font-family: 'SF Mono','Menlo','Monaco',monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #d1d1d6; user-select: text; }
+.log-line { display: block; }
+.log-line.log-warn { color: #ff9f0a; }
+.log-line.log-error { color: #ff453a; }
+.log-line.log-debug { color: #8e8e93; }
+.log-line.log-sys { color: #6366f1; font-style: italic; }
 
 /* ── Focus States (Accessibility) ─────────────────────────── */
 :focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,0.35); }

@@ -41,8 +41,10 @@ const (
 	defaultModelStudioBaseURL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
 )
 
-// envVarPattern matches ${ENV_VAR} placeholders in config values.
-var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
+// EnvVarPattern matches ${ENV_VAR} placeholders in config values. The dashboard
+// uses it to report which variables a stored config references; keeping one
+// pattern here means the report and the interpolation cannot drift apart.
+var EnvVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 
 // parseCommaSeparatedKeys splits a comma-separated string of API keys.
 // Empty entries are filtered out. Returns nil if no valid keys found.
@@ -149,7 +151,7 @@ func loadJSON(path string) (*Config, error) {
 
 // interpolateEnvVars replaces ${ENV_VAR} patterns with their actual values.
 func interpolateEnvVars(s string) string {
-	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
+	return EnvVarPattern.ReplaceAllStringFunc(s, func(match string) string {
 		// Extract variable name from ${VAR}
 		varName := match[2 : len(match)-1]
 		if val := envValue(varName); val != "" {
@@ -249,6 +251,7 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+// envValue resolves name through the canonical and legacy environment names.
 func envValue(name string) string {
 	if val := os.Getenv(name); val != "" {
 		return val
@@ -262,6 +265,15 @@ func envValue(name string) string {
 		}
 	}
 	return ""
+}
+
+// EnvValue returns the value the loader resolves for name, including the legacy
+// name fallbacks. Callers that report whether a config reference is satisfied
+// must use this instead of os.Getenv, or they will disagree with LoadFromPath
+// (e.g. a config referencing OC_GO_CC_API_KEY while only the canonical
+// ROUTATIC_PROXY_API_KEY is set).
+func EnvValue(name string) string {
+	return envValue(name)
 }
 
 // applyDefaults fills in missing configuration values with sensible defaults.
@@ -525,18 +537,19 @@ func validateSingleAPIKey(key string) error {
 	if key == "" {
 		return nil
 	}
-	if envVarPattern.MatchString(key) {
+	if EnvVarPattern.MatchString(key) {
 		return fmt.Errorf("api_key contains unresolved env var %q — set the corresponding environment variable or use api_keys", key)
 	}
 	return nil
 }
 
+// validateAPIKeys rejects empty entries and unresolved ${VAR} placeholders.
 func validateAPIKeys(keys []string) error {
 	for i, key := range keys {
 		if key == "" {
 			return fmt.Errorf("api_keys[%d] is empty — each key must be a non-empty string", i)
 		}
-		if envVarPattern.MatchString(key) {
+		if EnvVarPattern.MatchString(key) {
 			return fmt.Errorf("api_keys[%d] contains unresolved env var %q — set the corresponding environment variable or remove this entry", i, key)
 		}
 	}
