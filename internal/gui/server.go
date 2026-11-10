@@ -226,9 +226,10 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	// dashboard's loopback host before it is routed.
 	s.srv = &http.Server{
 		Handler: securityHeadersMiddleware(requestGuardMiddleware(int(s.guiPort.Load()), mux)),
-		// Bound slow clients; WriteTimeout stays unset because /api/logs/stream
-		// is a long-lived response.
+		// Bound slow clients, including a stalled request body. WriteTimeout
+		// stays unset because /api/logs/stream is a long-lived response.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
 	}
 	go func() {
 		if srvErr := s.srv.Serve(ln); srvErr != nil && srvErr != http.ErrServerClosed {
@@ -268,6 +269,7 @@ type metricsResponse struct {
 	ModelCounts       map[string]int64 `json:"model_counts"`
 }
 
+// handleMetrics serves the live in-process request counters.
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	var snap metrics.Snapshot
 	if s.met != nil {
@@ -301,6 +303,7 @@ type historyEntry struct {
 	ErrorMsg     string `json:"error_msg,omitempty"`
 }
 
+// handleHistory serves the last 200 requests from the in-memory ring buffer.
 func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
 	if s.hist == nil {
 		writeJSON(w, []historyEntry{})
@@ -326,6 +329,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
+// handleConfig reads and updates the GUI runtime settings (autostart, notifications).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -363,6 +367,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleProxyStart starts the managed proxy process.
 func (s *Server) handleProxyStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -381,6 +386,7 @@ func (s *Server) handleProxyStart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleProxyStop stops the managed proxy process.
 func (s *Server) handleProxyStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -399,6 +405,7 @@ func (s *Server) handleProxyStop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleProxyConfig returns the live config and applies partial updates to it.
 func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 	if s.atomicCfg == nil {
 		http.Error(w, "proxy config not available", http.StatusServiceUnavailable)
@@ -411,12 +418,8 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, cfg)
 
 	case http.MethodPost:
-		// Serialize with import and other saves: the merge reads the file, so two
-		// concurrent patches would otherwise overwrite each other.
-		s.configMu.Lock()
-		defer s.configMu.Unlock()
-
-		// Decode only the fields the client sent (partial update).
+		// Read and decode the body before taking the config lock: a client that
+		// stalls mid-body must not block other saves or imports.
 		r.Body = http.MaxBytesReader(w, r.Body, maxConfigPatchBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -433,6 +436,11 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("invalid config format: %v", err), http.StatusBadRequest)
 			return
 		}
+
+		// From here the sequence reads config.json, so serialize it with other
+		// saves and imports.
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
 
 		path := s.atomicCfg.Path()
 		// Merge onto the file as stored, so ${VAR} references the patch did not
@@ -566,6 +574,7 @@ func (s *Server) handleTestSend(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCatalogLock reports the on-disk catalog's sync metadata.
 func (s *Server) handleCatalogLock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -590,6 +599,7 @@ func (s *Server) handleCatalogLock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// handleCatalogSync refreshes the catalog from its configured source.
 func (s *Server) handleCatalogSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -622,6 +632,7 @@ func (s *Server) handleCatalogSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCatalogStats serves catalog size and provider metrics.
 func (s *Server) handleCatalogStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -697,6 +708,7 @@ func (s *Server) handleCatalogStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// writeJSON encodes v as a JSON response.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

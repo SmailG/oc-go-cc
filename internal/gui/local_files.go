@@ -47,6 +47,7 @@ var (
 // runOpener is swapped in tests so they never launch a real viewer.
 var runOpener = defaultOpener
 
+// defaultOpener launches the OS handler for path, bounded by ctx.
 func defaultOpener(ctx context.Context, path string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -168,6 +169,7 @@ func splitLogLines(buf []byte, dropFirst bool) []string {
 	return out
 }
 
+// trimCR removes a trailing carriage return from a log line.
 func trimCR(b []byte) string {
 	return string(bytes.TrimSuffix(b, []byte("\r")))
 }

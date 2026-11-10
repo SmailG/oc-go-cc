@@ -34,6 +34,7 @@ func logTestServer(t *testing.T, logContents string) (*Server, string) {
 	return &Server{atomicCfg: config.NewAtomicConfig(&config.Config{Host: "127.0.0.1", Port: 3456}, cfgPath)}, logPath
 }
 
+// The env override wins over the daemon default path.
 func TestLogFilePath_PrefersEnvOverride(t *testing.T) {
 	t.Setenv(LogFileEnvVar, "/tmp/elsewhere.log")
 	p, err := logFilePath()
@@ -56,6 +57,7 @@ func TestLogFilePath_PrefersEnvOverride(t *testing.T) {
 	}
 }
 
+// Complete lines survive; a window starting mid-line drops its fragment.
 func TestSplitLogLines(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -81,6 +83,7 @@ func TestSplitLogLines(t *testing.T) {
 	}
 }
 
+// The initial paint returns the tail, its path, and no truncation.
 func TestHandleLogs(t *testing.T) {
 	s, _ := logTestServer(t, "line1\nline2\nline3\n")
 
@@ -134,6 +137,7 @@ func TestHandleLogs_MissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
+// The opener receives the live config path.
 func TestHandleConfigOpen(t *testing.T) {
 	s, _ := logTestServer(t, "x\n")
 	var opened []string
@@ -152,6 +156,7 @@ func TestHandleConfigOpen(t *testing.T) {
 	}
 }
 
+// Non-POST requests and a missing config file are refused.
 func TestHandleConfigOpen_Rejects(t *testing.T) {
 	s, _ := logTestServer(t, "x\n")
 	called := false
@@ -182,6 +187,7 @@ func TestHandleConfigOpen_Rejects(t *testing.T) {
 	}
 }
 
+// The paths endpoint reports both local files.
 func TestHandleConfigPath(t *testing.T) {
 	s, logPath := logTestServer(t, "x\n")
 
@@ -221,6 +227,7 @@ func readSSEFrame(t *testing.T, sc *bufio.Scanner) (event, data string) {
 	return "", ""
 }
 
+// Appends are delivered and in-place truncation emits rotate.
 func TestHandleLogStream_FollowsAppendsAndTruncation(t *testing.T) {
 	old := logPollInterval
 	logPollInterval = 10 * time.Millisecond

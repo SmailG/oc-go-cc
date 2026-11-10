@@ -19,6 +19,7 @@ var sensitiveFieldPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)credential`),
 }
 
+// anonymizeConfig returns a copy of cfg with secret-looking fields redacted.
 func anonymizeConfig(cfg *config.Config) *config.Config {
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -38,6 +39,7 @@ func anonymizeConfig(cfg *config.Config) *config.Config {
 	return result
 }
 
+// anonymizeMap redacts sensitive keys in m, descending into nested objects.
 func anonymizeMap(m map[string]interface{}) {
 	for key, value := range m {
 		if shouldAnonymize(key) {
@@ -55,6 +57,7 @@ func anonymizeMap(m map[string]interface{}) {
 	}
 }
 
+// shouldAnonymize reports whether a config key holds a secret value.
 func shouldAnonymize(key string) bool {
 	lowerKey := strings.ToLower(key)
 	// api_key_env is the NAME of an environment variable, not a secret; redacting
@@ -70,6 +73,7 @@ func shouldAnonymize(key string) bool {
 	return false
 }
 
+// handleConfigExport streams the current config as a JSON download.
 func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 	if s.atomicCfg == nil {
 		http.Error(w, "config not available", http.StatusServiceUnavailable)
@@ -91,6 +95,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 	_ = encoder.Encode(cfg)
 }
 
+// handleConfigImport validates an uploaded config and applies it when requested.
 func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -166,6 +171,7 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// writeFileAtomic writes data beside path and renames it into place.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, perm); err != nil {

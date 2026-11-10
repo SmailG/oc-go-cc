@@ -17,6 +17,7 @@ func jevTestServer(path string, cfg *config.Config) *Server {
 	return &Server{atomicCfg: config.NewAtomicConfig(cfg, path)}
 }
 
+// postProxyConfig posts patch to the config handler and returns the recorder.
 func postProxyConfig(s *Server, patch map[string]any) *httptest.ResponseRecorder {
 	body, err := json.Marshal(patch)
 	if err != nil {

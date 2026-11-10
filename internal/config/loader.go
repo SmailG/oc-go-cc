@@ -251,6 +251,7 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+// envValue resolves name through the canonical and legacy environment names.
 func envValue(name string) string {
 	if val := os.Getenv(name); val != "" {
 		return val
@@ -542,6 +543,7 @@ func validateSingleAPIKey(key string) error {
 	return nil
 }
 
+// validateAPIKeys rejects empty entries and unresolved ${VAR} placeholders.
 func validateAPIKeys(keys []string) error {
 	for i, key := range keys {
 		if key == "" {
