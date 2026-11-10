@@ -67,7 +67,7 @@ This repository provides a cross-platform GUI for `routatic-proxy`:
 - **Linux** — Browser-based GUI via `xdg-open` (default, no CGO required). For system tray: build with `CGO_ENABLED=1` and install `libappindicator-gtk3-devel` (Fedora) or `libayatana-appindicator3-dev` (Ubuntu/Debian).
 - **Windows** — GUI not supported (CLI only).
 
-**Dashboard tabs:** Overview (real-time metrics & model distribution), History (last 1000 requests with filters), Settings (edit config with hot-reload).
+**Dashboard tabs:** Overview (real-time metrics & model distribution), History (last 1000 requests with filters), Settings (edit config with hot-reload, open the config file in the default app, and follow the log file live).
 
 The dashboard is available at `http://127.0.0.1:3445` when using `start` (not `serve`).
 

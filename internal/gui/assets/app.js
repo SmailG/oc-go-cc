@@ -90,6 +90,31 @@ const TRANSLATIONS = {
     'setting.restoreDesc': 'Import config from JSON file',
     'btn.export': 'Export',
     'btn.import': 'Import',
+    'btn.openConfig': 'Open Config',
+    'status.openConfigOk': 'Opened config: ',
+    'status.openConfigFail': 'Could not open config: ',
+    'setting.logs': 'Proxy Logs',
+    'setting.logsDesc': 'Follow the local log file live',
+    'btn.viewLogs': 'View Logs',
+    'logs.title': 'Proxy Logs',
+    'logs.follow': 'Follow',
+    'logs.clear': 'Clear',
+    'logs.live': 'live',
+    'logs.paused': 'paused',
+    'logs.new': 'new',
+    'logs.down': 'disconnected',
+    'logs.missing': 'Log file not found — the proxy may be writing to a terminal instead.',
+    'logs.unavailable': 'Could not read the log file.',
+    'logs.window': 'showing the end of the file',
+    'logs.rotated': 'log file rotated, following the new file',
+    'jev.enable': 'Classify requests with Jev',
+    'jev.enableHint': 'TypeSafe System One replaces keyword matching for requests the exact checks leave undecided. Applies without a restart.',
+    'jev.modeHint': "shadow logs Jev's choice beside the keyword scenario and changes nothing; active lets Jev decide and can add up to timeout_ms to a request.",
+    'key.env': 'env',
+    'key.set': 'set',
+    'key.notSet': 'not set',
+    'key.inFile': 'key stored in the config file',
+    'key.none': 'no key configured',
     'label.anonymize': 'Anonymize',
     'status.exporting': 'Exporting...',
     'status.exportOk': 'Config exported successfully!',
@@ -224,6 +249,31 @@ const TRANSLATIONS = {
     'setting.restoreDesc': '从 JSON 文件导入配置',
     'btn.export': '导出',
     'btn.import': '导入',
+    'btn.openConfig': '打开配置',
+    'status.openConfigOk': '已打开配置：',
+    'status.openConfigFail': '无法打开配置：',
+    'setting.logs': '代理日志',
+    'setting.logsDesc': '实时跟随本地日志文件',
+    'btn.viewLogs': '查看日志',
+    'logs.title': '代理日志',
+    'logs.follow': '跟随',
+    'logs.clear': '清空',
+    'logs.live': '实时',
+    'logs.paused': '已暂停',
+    'logs.new': '条新',
+    'logs.down': '已断开',
+    'logs.missing': '未找到日志文件——代理可能正输出到终端。',
+    'logs.unavailable': '无法读取日志文件。',
+    'logs.window': '显示文件末尾',
+    'logs.rotated': '日志文件已轮转，正在跟随新文件',
+    'jev.enable': '使用 Jev 分类请求',
+    'jev.enableHint': 'TypeSafe System One 取代关键词匹配，用于精确检查未能判定的请求。修改即时生效，无需重启。',
+    'jev.modeHint': 'shadow 仅在关键词场景旁记录 Jev 的判定，不改变路由；active 由 Jev 决定，最多为该请求增加 timeout_ms 的等待。',
+    'key.env': '环境变量',
+    'key.set': '已设置',
+    'key.notSet': '未设置',
+    'key.inFile': '密钥存于配置文件',
+    'key.none': '未配置密钥',
     'label.anonymize': '脱敏',
     'status.exporting': '导出中...',
     'status.exportOk': '配置导出成功！',
@@ -274,6 +324,7 @@ function toggleLanguage() {
   renderModelList(lastModelCounts);
   renderHistory();
   PerfModule.render();
+  refreshKeyStatus();
 }
 
 // Apply translations on load
@@ -718,6 +769,14 @@ const CONFIG_FIELDS = [
   ['api_key', 'cfg-global-key', 'string'],
   ['hot_reload', 'cfg-hot-reload', 'bool'],
 
+  // Routing — Jev
+  ['jev_routing.enabled', 'cfg-jev-enabled', 'bool'],
+  ['jev_routing.mode', 'cfg-jev-mode', 'string'],
+  ['jev_routing.model', 'cfg-jev-model', 'string'],
+  ['jev_routing.timeout_ms', 'cfg-jev-timeout', 'int'],
+  ['jev_routing.base_url', 'cfg-jev-base-url', 'string'],
+  ['jev_routing.api_key_env', 'cfg-jev-api-key-env', 'string'],
+
   // OpenCode Go
   ['opencode_go.base_url', 'cfg-go-base-url', 'string'],
   ['opencode_go.anthropic_base_url', 'cfg-go-anthropic-url', 'string'],
@@ -742,9 +801,53 @@ const CONFIG_FIELDS = [
   ['aws_bedrock.timeout_ms', 'cfg-bedrock-timeout', 'int'],
   ['aws_bedrock.stream_timeout_ms', 'cfg-bedrock-stream-timeout', 'int'],
 
+  // Model Studio (Token Plan)
+  ['model_studio.base_url', 'cfg-ms-base-url', 'string'],
+  ['model_studio.anthropic_base_url', 'cfg-ms-anthropic-url', 'string'],
+  ['model_studio.api_key', 'cfg-ms-api-key', 'string'],
+  ['model_studio.timeout_ms', 'cfg-ms-timeout', 'int'],
+  ['model_studio.stream_timeout_ms', 'cfg-ms-stream-timeout', 'int'],
+  ['model_studio.streaming_timeout_ms', 'cfg-ms-streaming-timeout', 'int'],
+
   // Logging
   ['logging.level', 'cfg-log-level', 'string'],
 ];
+
+// Config paths whose key source is reported under the field: [path, status element].
+const KEY_STATUS_FIELDS = [
+  ['model_studio.api_key', 'cfg-ms-key-status'],
+  ['jev_routing.api_key_env', 'cfg-jev-key-status'],
+];
+
+// refreshKeyStatus reports where each key comes from and whether it resolves.
+// Only names and presence cross the wire — the endpoint never returns values.
+async function refreshKeyStatus() {
+  let data;
+  try {
+    const r = await fetch('/api/config/env');
+    if (!r.ok) return;
+    data = await r.json();
+  } catch (e) {
+    return;
+  }
+  const refs = data.refs || {};
+  const env = data.env || {};
+
+  for (const [path, id] of KEY_STATUS_FIELDS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const names = refs[path] || [];
+    if (names.length) {
+      const missing = names.filter(n => !env[n]).length;
+      el.textContent = t('key.env') + ' ' + names.join(', ') + ' — ' + (missing ? t('key.notSet') : t('key.set'));
+      el.className = 'field-hint ' + (missing ? 'missing' : 'ok');
+      continue;
+    }
+    const live = deepGet(currentProxyConfig, path);
+    el.textContent = live ? t('key.inFile') : t('key.none');
+    el.className = 'field-hint ' + (live ? 'ok' : 'missing');
+  }
+}
 
 // Deep-set a value in an object by dot-separated path.
 function deepSet(obj, path, value) {
@@ -803,6 +906,7 @@ async function loadProxyConfig() {
         el.value = val || '';
       }
     }
+    await refreshKeyStatus();
   } catch (e) {
     console.error('Failed to load proxy config:', e);
   }
@@ -1101,6 +1205,8 @@ document.addEventListener('keydown', function(e) {
       closeCommandPalette();
     } else if (TestModule.testModal?.classList.contains('visible')) {
       TestModule.close();
+    } else if (document.getElementById('log-modal')?.classList.contains('visible')) {
+      LogPanel.close();
     } else if (modal.classList.contains('visible')) {
       closeHistoryModal();
     }
@@ -1252,6 +1358,190 @@ document.addEventListener('DOMContentLoaded', () => {
       handleConfigImport(e.target.files[0]);
     }
   });
+});
+
+/* ── Open Config File ─────────────────────────────────────────── */
+async function openConfigFile() {
+  const btn = document.getElementById('btn-open-config');
+  btn.disabled = true;
+  try {
+    const response = await fetch('/api/config/open', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const data = await response.json();
+    showSaveStatus(t('status.openConfigOk') + data.path, 'success');
+  } catch (e) {
+    showSaveStatus(t('status.openConfigFail') + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Log Stream Panel ─────────────────────────────────────────── */
+const LogPanel = {
+  es: null,
+  follow: true,
+  stick: true, // pinned to the bottom: new lines keep the view scrolled down
+  pending: [], // lines received while paused, shown when following resumes
+  maxLines: 2000,
+
+  init() {
+    document.getElementById('btn-view-logs')?.addEventListener('click', () => this.open());
+    document.getElementById('log-modal-close')?.addEventListener('click', () => this.close());
+    document.getElementById('btn-log-clear')?.addEventListener('click', () => {
+      document.getElementById('log-view').replaceChildren();
+      this.pending = [];
+    });
+    document.getElementById('log-follow')?.addEventListener('change', e => {
+      this.follow = e.target.checked;
+      if (this.follow) {
+        this.flushPending();
+        this.setState(this.es ? t('logs.live') : '', 'live');
+      } else {
+        this.setState(t('logs.paused'), '');
+      }
+    });
+    const view = document.getElementById('log-view');
+    view?.addEventListener('scroll', () => {
+      this.stick = view.scrollHeight - view.scrollTop - view.clientHeight < 24;
+    });
+  },
+
+  async open() {
+    document.getElementById('log-modal').classList.add('visible');
+    if (document.getElementById('log-view').childElementCount === 0) {
+      await this.load();
+    } else if (this.follow && !this.es) {
+      this.attach();
+    }
+  },
+
+  close() {
+    this.detach();
+    document.getElementById('log-modal').classList.remove('visible');
+  },
+
+  async load() {
+    this.pending = [];
+    try {
+      const response = await fetch('/api/logs');
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const data = await response.json();
+      const pathEl = document.getElementById('log-meta-path');
+      pathEl.textContent = data.path || '';
+      pathEl.title = data.path || '';
+      if (!data.exists) {
+        this.setState(t('logs.down'), 'down');
+        this.addLines([t('logs.missing')], 'log-sys');
+        return;
+      }
+      this.setState(data.truncated ? t('logs.window') : '', '');
+      if (data.lines && data.lines.length) {
+        this.addLines(data.lines);
+        this.stick = true;
+      }
+      if (this.follow) {
+        this.attach();
+      }
+    } catch (e) {
+      this.setState(t('logs.down'), 'down');
+      this.addLines([t('logs.unavailable') + ' ' + e.message], 'log-sys');
+    }
+  },
+
+  attach() {
+    this.detach();
+    // from=end: load() already rendered the window, so replaying it would duplicate.
+    const es = new EventSource('/api/logs/stream?from=end');
+    es.addEventListener('open', () => this.setState(t('logs.live'), 'live'));
+    es.addEventListener('line', e => this.receive(JSON.parse(e.data)));
+    es.addEventListener('rotate', () => {
+      if (this.follow) {
+        this.addLines([t('logs.rotated')], 'log-sys');
+      } else {
+        this.pending.push({ text: t('logs.rotated'), cls: 'log-sys' });
+      }
+    });
+    es.addEventListener('error', e => {
+      if (e.data) {
+        this.addLines([JSON.parse(e.data)], 'log-error');
+      }
+    });
+    es.onerror = () => {
+      this.setState(t('logs.down'), 'down');
+      if (es.readyState === EventSource.CLOSED) {
+        this.es = null;
+      }
+    };
+    this.es = es;
+  },
+
+  receive(line) {
+    if (this.follow) {
+      this.addLines([line]);
+      return;
+    }
+    this.pending.push(line);
+    if (this.pending.length > this.maxLines) {
+      this.pending.shift();
+    }
+    this.setState(t('logs.paused') + ' · ' + this.pending.length + ' ' + t('logs.new'), '');
+  },
+
+  flushPending() {
+    if (!this.pending.length) {
+      return;
+    }
+    this.addLines(this.pending);
+    this.pending = [];
+  },
+
+  detach() {
+    if (this.es) {
+      this.es.close();
+      this.es = null;
+    }
+  },
+
+  setState(text, cls) {
+    const el = document.getElementById('log-meta-state');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'log-meta-state' + (cls ? ' ' + cls : '');
+  },
+
+  addLines(lines, cls) {
+    const view = document.getElementById('log-view');
+    const frag = document.createDocumentFragment();
+    for (const item of lines) {
+      const line = typeof item === 'string' ? item : item.text;
+      const klass = (typeof item === 'string' ? cls : item.cls) || this.levelClass(line);
+      const el = document.createElement('span');
+      el.className = 'log-line ' + klass;
+      el.textContent = line;
+      frag.appendChild(el);
+    }
+    view.appendChild(frag);
+    while (view.childElementCount > this.maxLines) {
+      view.firstElementChild.remove();
+    }
+    if (this.stick) {
+      view.scrollTop = view.scrollHeight;
+    }
+  },
+
+  levelClass(line) {
+    const m = /level=(ERROR|WARN|DEBUG)\b/.exec(line);
+    return m ? 'log-' + m[1].toLowerCase() : '';
+  }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btn-open-config')?.addEventListener('click', openConfigFile);
+  LogPanel.init();
 });
 
 /* ── Fallback Chain Editor ─────────────────────────────────────── */

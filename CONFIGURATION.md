@@ -24,7 +24,7 @@ For migration, `~/.config/oc-go-cc/config.json` is loaded when the new config fi
   "jev_routing": {
     "enabled": false,
     "mode": "active",
-    "model": "jev-1.13.0",
+    "model": "jev-1.14.0",
     "timeout_ms": 800,
     "api_key_env": "TYPESAFE_AI_API_KEY",
     "base_url": "https://api.typesafe.ai"
@@ -183,7 +183,7 @@ Scenario routing decides `complex`, `think` and `background` with substring keyw
 | --- | --- | --- |
 | `enabled` | `false` | Turn the classifier on. A disabled block changes nothing. It only runs for requests that reach scenario routing: a request with a non-empty `model` is resolved by `respect_requested_model` first (see **What runs first**). |
 | `mode` | `"active"` | `"active"` lets Jev decide (waits at most `timeout_ms`, falls back to the keyword result on any failure); `"shadow"` only logs what Jev would choose and routes as before. `enabled` stays `false` by default, so nothing is sent until you turn it on. |
-| `model` | `"jev-1.13.0"` | TypeSafe model id sent in the request. |
+| `model` | `"jev-1.14.0"` | TypeSafe model id sent in the request. |
 | `timeout_ms` | `800` | Deadline for the call, 1 to 10000. |
 | `api_key_env` | `"TYPESAFE_AI_API_KEY"` | **Name** of the environment variable that holds the API key. The key is read from the environment on each call; it is never stored in the config file or logged. A value that is not a plain variable name fails the load when `enabled` is `true` (a disabled block is not validated). |
 | `base_url` | `"https://api.typesafe.ai"` | TypeSafe API base URL. Must be `https`, except `http` is accepted for a loopback host (`localhost`, `127.0.0.0/8`, `::1`) so a local stub or tunnel works: the key and the prompt text travel here, so no cleartext off the machine. Redirects are never followed; a 3xx is a failed call and the keyword result stands. |
@@ -492,6 +492,8 @@ Environment variables override config file values. Config values also support `$
 | `ROUTATIC_PROXY_MODEL_STUDIO_URL` | Model Studio Chat Completions endpoint | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` |
 | `ROUTATIC_PROXY_MODEL_STUDIO_ANTHROPIC_URL` | Model Studio native Anthropic endpoint (empty by default; when set it becomes the preferred wire format) | — |
 | `ROUTATIC_PROXY_LOG_LEVEL`    | Log level: `debug`, `info`, `warn`, `error` | `info`                                           |
+| `ROUTATIC_PROXY_GUI_PORT`     | Dashboard port                              | `3445`                                           |
+| `ROUTATIC_PROXY_LOG_FILE`     | Log file the dashboard's Proxy Logs panel follows (read-only; the panel never writes) | `~/.config/routatic-proxy/routatic-proxy.log` |
 
 Legacy equivalents such as `OC_GO_CC_API_KEY`, `OC_GO_CC_CONFIG`, and `OC_GO_CC_PORT` continue to work. When both names are set, the `ROUTATIC_PROXY_*` value wins.
 

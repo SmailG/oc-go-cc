@@ -183,6 +183,11 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 
 	mux.HandleFunc("/api/config/export", s.handleConfigExport)
 	mux.HandleFunc("/api/config/import", s.handleConfigImport)
+	mux.HandleFunc("/api/config/open", s.handleConfigOpen)
+	mux.HandleFunc("/api/config/path", s.handleConfigPath)
+	mux.HandleFunc("/api/config/env", s.handleConfigEnv)
+	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.HandleFunc("/api/logs/stream", s.handleLogStream)
 	mux.HandleFunc("/api/perf/models", s.handlePerformance)
 	mux.HandleFunc("/api/perf/aggregate", s.handlePerformanceAggregate)
 	mux.HandleFunc("/api/catalog/stats", s.handleCatalogStats)
@@ -395,29 +400,23 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, cfg)
 
 	case http.MethodPost:
-		// Read the current config from disk as the baseline.
-		configPath := s.atomicCfg.Path()
-		currentCfg, err := config.LoadFromPath(configPath)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to read current config: %v", err), http.StatusInternalServerError)
-			return
-		}
-
 		// Decode only the fields the client sent (partial update).
 		var patch map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 			http.Error(w, fmt.Sprintf("invalid config format: %v", err), http.StatusBadRequest)
 			return
 		}
-
-		// Apply each patch field onto the current config.
 		patchBytes, err := json.Marshal(patch)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to re-encode patch: %v", err), http.StatusInternalServerError)
 			return
 		}
-		if err := json.Unmarshal(patchBytes, currentCfg); err != nil {
-			http.Error(w, fmt.Sprintf("failed to apply patch: %v", err), http.StatusInternalServerError)
+
+		// Merge onto the config on disk. The result keeps ${VAR} references the
+		// patch did not replace, so a save cannot bake resolved keys into the file.
+		data, currentCfg, err := mergeConfigPatch(s.atomicCfg.Path(), patchBytes)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to apply config patch: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -431,13 +430,15 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Serialize and write the merged config.
-		data, err := json.MarshalIndent(currentCfg, "", "  ")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to serialize config: %v", err), http.StatusInternalServerError)
+		// Validate before touching the file. A disabled jev_routing block is inert and
+		// unvalidated, so the block this patch just enabled may be one the loader would
+		// reject — Reload would fail only after the working config was already replaced.
+		if err := config.CheckJevRouting(currentCfg.JevRouting); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := os.WriteFile(configPath, data, 0600); err != nil {
+
+		if err := os.WriteFile(s.atomicCfg.Path(), data, 0600); err != nil {
 			http.Error(w, fmt.Sprintf("failed to write config file: %v", err), http.StatusInternalServerError)
 			return
 		}
