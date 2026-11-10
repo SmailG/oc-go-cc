@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -319,6 +320,11 @@ func TestHandleLogStream_StartsAtEOF(t *testing.T) {
 // Rename-based rotation is the common logrotate mode: the descriptor keeps
 // pointing at the old inode, so only a path comparison can notice the swap.
 func TestHandleLogStream_ReopensAfterRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Go opens files there without FILE_SHARE_DELETE, so the rename fails
+		// while the stream holds the old handle; Windows rotation is copytruncate.
+		t.Skip("cannot rename an open log file on Windows")
+	}
 	old := logPollInterval
 	logPollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { logPollInterval = old })

@@ -80,24 +80,47 @@ func logFilePath() (string, error) {
 	return paths.LogFile, nil
 }
 
+// errNotRegular reports a log path that is not a plain file. Devices and FIFOs
+// must never be opened: open(2) blocks on a FIFO until a writer appears, which
+// would hold a handler (or a follower slot) indefinitely.
+var errNotRegular = errors.New("not a regular file")
+
+// openRegular opens path only after confirming it is a regular file, both before
+// and after the open. The pre-open stat is what prevents a FIFO from blocking in
+// os.Open; the post-open check covers a path swapped between the two calls.
+func openRegular(path string) (*os.File, os.FileInfo, error) {
+	pre, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !st.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	return f, st, nil
+}
+
 // tailFile reads the last limitBytes of path. A partial leading line is dropped
 // when the window starts mid-file, so the caller only ever sees complete lines.
 func tailFile(path string, limitBytes int64) (lines []string, truncated bool, err error) {
-	f, err := os.Open(path)
+	f, st, err := openRegular(path)
 	if err != nil {
 		return nil, false, err
 	}
 	defer func() { _ = f.Close() }()
 
-	st, err := f.Stat()
-	if err != nil {
-		return nil, false, err
-	}
-	// The export path is operator-controlled, but streaming a device or FIFO
-	// would block or spin forever; only plain files are logs.
-	if !st.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("%s is not a regular file", path)
-	}
 	size := st.Size()
 	start := int64(0)
 	if size > limitBytes {
@@ -272,32 +295,25 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	f, err := os.Open(path)
+	f, st, err := openRegular(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
 			http.Error(w, fmt.Sprintf("log file not found: %s", path), http.StatusNotFound)
-			return
+		case errors.Is(err, errNotRegular):
+			http.Error(w, fmt.Sprintf("%s is not a regular file", path), http.StatusUnsupportedMediaType)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
-	// Capture EOF before any header is flushed. Once the client sees the response
-	// it may append, and a line written before the offset was read would fall
-	// behind it and never be delivered.
-	st, err := f.Stat()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("reading log file: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if !st.Mode().IsRegular() {
-		http.Error(w, fmt.Sprintf("%s is not a regular file", path), http.StatusUnsupportedMediaType)
-		return
-	}
 	// Start at EOF: the panel paints the window from GET /api/logs first, so a
 	// tail here would render the same lines twice. It also makes an EventSource
-	// reconnect idempotent.
+	// reconnect idempotent. The offset is captured before any header is flushed:
+	// once the client sees the response it may append, and a line written before
+	// the offset was read would fall behind it and never be delivered.
 	offset := st.Size()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -340,7 +356,7 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 			}
 			misses = 0
 			if !os.SameFile(st, ps) {
-				nf, err := os.Open(path)
+				nf, _, err := openRegular(path)
 				if err != nil {
 					continue
 				}

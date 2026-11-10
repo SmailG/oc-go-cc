@@ -59,6 +59,10 @@ type Server struct {
 	srv               *http.Server
 	logger            *slog.Logger
 	catalogMu         sync.Mutex
+	// configMu serializes config read-merge-write-reload sequences. The write is
+	// atomic, but two concurrent saves could read the same file and the last
+	// rename would discard the other patch.
+	configMu sync.Mutex
 
 	storage *storage.Database
 }
@@ -220,7 +224,12 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	// Wrap with security headers middleware. The request guard runs inside it so
 	// every request — static assets and API alike — is checked against the
 	// dashboard's loopback host before it is routed.
-	s.srv = &http.Server{Handler: securityHeadersMiddleware(requestGuardMiddleware(int(s.guiPort.Load()), mux))}
+	s.srv = &http.Server{
+		Handler: securityHeadersMiddleware(requestGuardMiddleware(int(s.guiPort.Load()), mux)),
+		// Bound slow clients; WriteTimeout stays unset because /api/logs/stream
+		// is a long-lived response.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		if srvErr := s.srv.Serve(ln); srvErr != nil && srvErr != http.ErrServerClosed {
 			s.logger.Error("gui server error", "err", srvErr)
@@ -402,9 +411,20 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, cfg)
 
 	case http.MethodPost:
+		// Serialize with import and other saves: the merge reads the file, so two
+		// concurrent patches would otherwise overwrite each other.
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+
 		// Decode only the fields the client sent (partial update).
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxConfigPatchBytes))
+		r.Body = http.MaxBytesReader(w, r.Body, maxConfigPatchBytes)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "config patch too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, fmt.Sprintf("failed to read config patch: %v", err), http.StatusBadRequest)
 			return
 		}

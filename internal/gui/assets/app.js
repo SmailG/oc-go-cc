@@ -1434,6 +1434,16 @@ async function openConfigFile() {
 }
 
 /* ── Log Stream Panel ─────────────────────────────────────────── */
+// The server JSON-encodes each SSE payload. Fall back to the raw text rather
+// than throwing inside the listener and silently dropping the line.
+function parseSSEData(data) {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
+}
+
 const LogPanel = {
   es: null,
   active: false, // modal is open; a finishing load() must not attach after close
@@ -1534,7 +1544,7 @@ const LogPanel = {
     // it would duplicate the tail.
     const es = new EventSource('/api/logs/stream');
     es.addEventListener('open', () => this.setState(t('logs.live'), 'live'));
-    es.addEventListener('line', e => this.receive(JSON.parse(e.data)));
+    es.addEventListener('line', e => this.receive(parseSSEData(e.data)));
     es.addEventListener('rotate', () => {
       if (this.follow) {
         this.addLines([t('logs.rotated')], 'log-sys');
@@ -1544,7 +1554,7 @@ const LogPanel = {
     });
     es.addEventListener('error', e => {
       if (e.data) {
-        this.addLines([JSON.parse(e.data)], 'log-error');
+        this.addLines([parseSSEData(e.data)], 'log-error');
       }
     });
     es.onerror = () => {

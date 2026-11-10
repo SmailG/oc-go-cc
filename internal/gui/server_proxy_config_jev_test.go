@@ -123,6 +123,26 @@ func TestHandleProxyConfig_DisableJevClearsTheLiveConfig(t *testing.T) {
 	}
 }
 
+// The patch body is capped; an oversized request must say so instead of being
+// silently truncated into a generic JSON error.
+func TestHandleProxyConfig_RejectsOversizedPatch(t *testing.T) {
+	t.Setenv("ROUTATIC_PROXY_API_KEY", "test-key")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"host":"127.0.0.1","port":3456}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := jevTestServer(path, &config.Config{Host: "127.0.0.1", Port: 3456})
+
+	body := bytes.Repeat([]byte("x"), maxConfigPatchBytes+1)
+	rec := httptest.NewRecorder()
+	s.handleProxyConfig(rec, httptest.NewRequest(http.MethodPost, "/api/proxy/config", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
 // The jev_routing check is not the only loader rule that matters: any field the
 // form exposes can be invalid. Validation must run on the merged document before
 // it replaces config.json, or a failed reload leaves an unbootable file behind.

@@ -173,8 +173,8 @@
             <input type="checkbox" id="log-follow" checked>
             <span data-i18n="logs.follow">Follow</span>
           </label>
-          <button class="btn btn-small" id="btn-log-clear" data-i18n="logs.clear">Clear</button>
-          <button class="modal-close" id="log-modal-close" aria-label="Close log panel" data-i18n-aria="logs.close">
+          <button type="button" class="btn btn-small" id="btn-log-clear" data-i18n="logs.clear">Clear</button>
+          <button type="button" class="modal-close" id="log-modal-close" aria-label="Close log panel" data-i18n-aria="logs.close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -420,19 +420,21 @@
           <button class="btn btn-small" id="btn-test-model" data-i18n="btn.testModel">Test Model</button>
         </div>
 
-        <div class="flex items-center justify-between px-4 py-3.5 border-b border-[#48484a]">
+        <div class="flex items-start justify-between px-4 py-3.5 border-b border-[#48484a]">
           <div>
             <div class="text-sm font-medium mb-0.5" data-i18n="setting.backup">Backup Configuration</div>
             <div class="text-xs text-[#98989d]" data-i18n="setting.backupDesc">Export current config as JSON file</div>
-            <div id="open-config-status" class="save-status text-left"></div>
           </div>
-          <div class="flex items-center gap-2">
-            <button class="btn btn-small" id="btn-export-config" data-i18n="btn.export">Export</button>
-            <label class="checkbox-inline flex items-center gap-1 text-xs text-[#98989d] cursor-pointer">
-              <input type="checkbox" id="export-anonymize" class="cursor-pointer">
-              <span data-i18n="label.anonymize">Anonymize</span>
-            </label>
-            <button class="btn btn-small" id="btn-open-config" title="Open the config file the proxy loaded in the default app" data-i18n="btn.openConfig" data-i18n-title="btn.openConfigTitle">Open Config</button>
+          <div class="flex flex-col items-end gap-1">
+            <div class="flex items-center gap-2">
+              <button type="button" class="btn btn-small" id="btn-export-config" data-i18n="btn.export">Export</button>
+              <label class="checkbox-inline flex items-center gap-1 text-xs text-[#98989d] cursor-pointer">
+                <input type="checkbox" id="export-anonymize" class="cursor-pointer">
+                <span data-i18n="label.anonymize">Anonymize</span>
+              </label>
+              <button type="button" class="btn btn-small" id="btn-open-config" title="Open the config file the proxy loaded in the default app" data-i18n="btn.openConfig" data-i18n-title="btn.openConfigTitle">Open Config</button>
+            </div>
+            <div id="open-config-status" class="save-status text-right"></div>
           </div>
         </div>
 
@@ -450,7 +452,7 @@
             <div class="text-sm font-medium mb-0.5" data-i18n="setting.logs">Proxy Logs</div>
             <div class="text-xs text-[#98989d]" data-i18n="setting.logsDesc">Follow the local log file live</div>
           </div>
-          <button class="btn btn-small" id="btn-view-logs" data-i18n="btn.viewLogs">View Logs</button>
+          <button type="button" class="btn btn-small" id="btn-view-logs" data-i18n="btn.viewLogs">View Logs</button>
         </div>
       </div>
     </div>

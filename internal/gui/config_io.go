@@ -139,6 +139,11 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("invalid config: %v", err), http.StatusBadRequest)
 			return
 		}
+		// Shared with the partial-update endpoint so an import cannot interleave
+		// with a save's read-merge-write sequence.
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
+
 		configPath := s.atomicCfg.Path()
 		data, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {

@@ -90,9 +90,9 @@ input:checked + .toggle-slider::before { transform: translateX(18px); }
 .save-status { margin-top: 10px; font-size: 12px; text-align: center; }
 .save-status.success { color: #30d158; }
 .save-status.error { color: #ff453a; }
-/* The Open Config result sits in the Backup card, next to the button, so a
-   failure is visible without scrolling to the save button at the form's end. */
-#open-config-status { text-align: left; margin-top: 4px; min-height: 14px; }
+/* The Open Config result sits directly under its controls in the Backup card,
+   right-aligned with them, so it cannot be read as an Export message. */
+#open-config-status { text-align: right; margin-top: 4px; min-height: 14px; }
 
 /* ── Tab System ───────────────────────────────────────────── */
 .tab.active { color: #6366f1; background: #2c2c2e; border-bottom: 2px solid #6366f1; font-weight: 500; }
