@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,10 +71,12 @@ func TestSplitLogLines(t *testing.T) {
 		{"window with no newline is all fragment", "one huge line", true, nil},
 	}
 	for _, tc := range tests {
-		got := splitLogLines([]byte(tc.in), tc.dropFirst)
-		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-			t.Errorf("%s: got %#v, want %#v", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitLogLines([]byte(tc.in), tc.dropFirst)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -134,7 +137,7 @@ func TestHandleConfigOpen(t *testing.T) {
 	s, _ := logTestServer(t, "x\n")
 	var opened []string
 	restore := runOpener
-	runOpener = func(path string) error { opened = append(opened, path); return nil }
+	runOpener = func(_ context.Context, path string) error { opened = append(opened, path); return nil }
 	t.Cleanup(func() { runOpener = restore })
 
 	rec := httptest.NewRecorder()
@@ -152,7 +155,7 @@ func TestHandleConfigOpen_Rejects(t *testing.T) {
 	s, _ := logTestServer(t, "x\n")
 	called := false
 	restore := runOpener
-	runOpener = func(string) error { called = true; return nil }
+	runOpener = func(context.Context, string) error { called = true; return nil }
 	t.Cleanup(func() { runOpener = restore })
 
 	t.Run("get", func(t *testing.T) {
@@ -160,18 +163,6 @@ func TestHandleConfigOpen_Rejects(t *testing.T) {
 		s.handleConfigOpen(rec, httptest.NewRequest(http.MethodGet, "/api/config/open", nil))
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("status = %d, want 405", rec.Code)
-		}
-	})
-
-	// Any page in the user's browser can POST to the loopback dashboard; opening
-	// a local application is a side effect worth refusing.
-	t.Run("cross origin", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/config/open", nil)
-		req.Header.Set("Origin", "https://evil.example")
-		rec := httptest.NewRecorder()
-		s.handleConfigOpen(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("status = %d, want 403", rec.Code)
 		}
 	})
 
@@ -256,18 +247,6 @@ func TestHandleLogStream_FollowsAppendsAndTruncation(t *testing.T) {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 
-	event, data := readSSEFrame(t, sc)
-	if event != "tail" {
-		t.Fatalf("first event = %q, want tail", event)
-	}
-	var tail []string
-	if err := json.Unmarshal([]byte(data), &tail); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(tail, ",") != "first,second" {
-		t.Errorf("tail = %#v", tail)
-	}
-
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +257,7 @@ func TestHandleLogStream_FollowsAppendsAndTruncation(t *testing.T) {
 	_ = f.Close()
 
 	// Only the complete line may be delivered; "part" has no newline yet.
-	event, data = readSSEFrame(t, sc)
+	event, data := readSSEFrame(t, sc)
 	if event != "line" || data != `"appended"` {
 		t.Fatalf("event = %q data = %q, want line/appended", event, data)
 	}
@@ -298,8 +277,8 @@ func TestHandleLogStream_FollowsAppendsAndTruncation(t *testing.T) {
 }
 
 // The panel paints the tail from GET /api/logs and then follows from EOF, so the
-// stream must not replay the window it has already rendered.
-func TestHandleLogStream_FromEndSkipsTheTail(t *testing.T) {
+// stream must start at the end and never replay the window already rendered.
+func TestHandleLogStream_StartsAtEOF(t *testing.T) {
 	old := logPollInterval
 	logPollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { logPollInterval = old })
@@ -310,7 +289,7 @@ func TestHandleLogStream_FromEndSkipsTheTail(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"?from=end", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,5 +313,59 @@ func TestHandleLogStream_FromEndSkipsTheTail(t *testing.T) {
 	event, data := readSSEFrame(t, sc)
 	if event != "line" || data != `"after"` {
 		t.Fatalf("event = %q data = %q, want the first frame to be line/after", event, data)
+	}
+}
+
+// Rename-based rotation is the common logrotate mode: the descriptor keeps
+// pointing at the old inode, so only a path comparison can notice the swap.
+func TestHandleLogStream_ReopensAfterRename(t *testing.T) {
+	old := logPollInterval
+	logPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { logPollInterval = old })
+
+	s, logPath := logTestServer(t, "old\n")
+	srv := httptest.NewServer(http.HandlerFunc(s.handleLogStream))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := os.Rename(logPath, logPath+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	event, _ := readSSEFrame(t, sc)
+	if event != "rotate" {
+		t.Fatalf("event = %q, want rotate after the path was replaced", event)
+	}
+	event, data := readSSEFrame(t, sc)
+	if event != "line" || data != `"new"` {
+		t.Fatalf("after rotate: event = %q data = %q, want line/new", event, data)
+	}
+}
+
+// A directory is not a log; opening it must fail before streaming starts.
+func TestHandleLogs_RejectsNonRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(LogFileEnvVar, dir)
+	s := &Server{}
+	rec := httptest.NewRecorder()
+	s.handleLogs(rec, httptest.NewRequest(http.MethodGet, "/api/logs", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 for a non-regular log path", rec.Code)
 	}
 }

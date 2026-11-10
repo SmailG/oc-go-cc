@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
+	"path/filepath"
 
 	"github.com/routatic/proxy/internal/config"
 )
-
-// envRefPattern matches the ${VAR} placeholders the loader interpolates.
-var envRefPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 
 // decodeJSONMap decodes JSON without going through float64, so numbers the
 // config file wrote are re-encoded exactly as they were.
@@ -22,42 +19,66 @@ func decodeJSONMap(data []byte, dst *map[string]any) error {
 	return dec.Decode(dst)
 }
 
-// restoreEnvRefs puts the ${VAR} references back where the patch did not reach.
+// mergeConfigPatch applies patch onto the config document stored at path and
+// returns the JSON to write.
 //
-// The dashboard form is filled from the live config, which the loader has already
-// interpolated, so saving any field would otherwise write every resolved secret
-// into config.json. raw is the file as stored, merged is the post-patch config,
-// and patch holds the keys the client actually sent.
-func restoreEnvRefs(raw, merged, patch map[string]any) {
-	for k, rv := range raw {
-		pv, inPatch := patch[k]
-		switch r := rv.(type) {
-		case string:
-			if !inPatch && envRefPattern.MatchString(r) {
-				merged[k] = r
-			}
-		case []any:
-			if !inPatch && containsEnvRef(r) {
-				merged[k] = r
-			}
-		case map[string]any:
-			mm, ok := merged[k].(map[string]any)
-			if !ok {
-				continue
-			}
-			sub, _ := pv.(map[string]any)
-			restoreEnvRefs(r, mm, sub)
+// The merge runs on the decoded file, not on the typed Config, on purpose: the
+// loader interpolates ${VAR} references anywhere in the document, so
+// re-serializing the loaded config would write every resolved secret back as a
+// literal. Working on the raw map preserves references, keys this build does not
+// know about, and the exact number encoding for everything the patch does not
+// touch.
+func mergeConfigPatch(path string, patch map[string]any) ([]byte, error) {
+	rawFile, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config %s: %w", path, err)
+	}
+	var raw map[string]any
+	if err := decodeJSONMap(rawFile, &raw); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	}
+	mergeJSONMap(raw, patch)
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encoding merged config: %w", err)
+	}
+	return out, nil
+}
+
+// mergeJSONMap merges src into dst: objects merge key by key, anything else
+// replaces the value that was there.
+func mergeJSONMap(dst, src map[string]any) {
+	for k, sv := range src {
+		sm, srcIsMap := sv.(map[string]any)
+		dm, dstIsMap := dst[k].(map[string]any)
+		if srcIsMap && dstIsMap {
+			mergeJSONMap(dm, sm)
+			continue
 		}
+		dst[k] = sv
 	}
 }
 
-func containsEnvRef(list []any) bool {
-	for _, v := range list {
-		if s, ok := v.(string); ok && envRefPattern.MatchString(s) {
-			return true
-		}
+// writeTempConfig writes data to a 0600 file beside path so the caller can
+// validate the merged document before it replaces the live config. The rename
+// that follows is atomic, so a failed validation or a crash mid-write cannot
+// leave a truncated config.json behind.
+func writeTempConfig(path string, data []byte) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("creating temp config: %w", err)
 	}
-	return false
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("writing temp config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("closing temp config: %w", err)
+	}
+	return tmp, nil
 }
 
 // handleConfigEnv reports which env vars the stored config references and
@@ -75,7 +96,7 @@ func (s *Server) handleConfigEnv(w http.ResponseWriter, r *http.Request) {
 
 	data, err := os.ReadFile(s.atomicCfg.Path())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("reading config: %v", err), http.StatusInternalServerError)
 		return
 	}
 	var raw map[string]any
@@ -87,16 +108,19 @@ func (s *Server) handleConfigEnv(w http.ResponseWriter, r *http.Request) {
 	refs := map[string][]string{}
 	collectEnvRefs("", raw, refs)
 	// jev_routing.api_key_env holds a bare variable name rather than a ${VAR},
-	// because it names the variable the classifier reads at call time.
+	// because it names the variable the classifier reads at call time. Append
+	// rather than assign: the file may also contain a raw ${VAR} there.
 	if name := s.atomicCfg.Get().JevRouting.APIKeyEnv; name != "" {
-		refs["jev_routing.api_key_env"] = []string{name}
+		refs["jev_routing.api_key_env"] = appendUnique(refs["jev_routing.api_key_env"], name)
 	}
 
 	env := map[string]bool{}
 	for _, names := range refs {
 		for _, name := range names {
 			if _, seen := env[name]; !seen {
-				env[name] = os.Getenv(name) != ""
+				// config.EnvValue is what the loader uses, so the status here
+				// agrees with what a reload would actually resolve.
+				env[name] = config.EnvValue(name) != ""
 			}
 		}
 	}
@@ -119,7 +143,7 @@ func collectEnvRefs(path string, v any, out map[string][]string) {
 			collectEnvRefs(path, child, out)
 		}
 	case string:
-		for _, m := range envRefPattern.FindAllStringSubmatch(t, -1) {
+		for _, m := range config.EnvVarPattern.FindAllStringSubmatch(t, -1) {
 			out[path] = appendUnique(out[path], m[1])
 		}
 	}
@@ -132,42 +156,4 @@ func appendUnique(list []string, v string) []string {
 		}
 	}
 	return append(list, v)
-}
-
-// mergeConfigPatch applies patch onto the config stored at path and returns the
-// JSON to write, with untouched ${VAR} references left in place.
-func mergeConfigPatch(path string, patchBytes []byte) ([]byte, *config.Config, error) {
-	rawFile, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	current, err := config.LoadFromPath(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := json.Unmarshal(patchBytes, current); err != nil {
-		return nil, nil, fmt.Errorf("failed to apply patch: %w", err)
-	}
-
-	mergedBytes, err := json.Marshal(current)
-	if err != nil {
-		return nil, nil, err
-	}
-	var raw, merged, patch map[string]any
-	if err := decodeJSONMap(rawFile, &raw); err != nil {
-		return nil, nil, fmt.Errorf("invalid config file: %w", err)
-	}
-	if err := decodeJSONMap(mergedBytes, &merged); err != nil {
-		return nil, nil, err
-	}
-	if err := decodeJSONMap(patchBytes, &patch); err != nil {
-		return nil, nil, err
-	}
-	restoreEnvRefs(raw, merged, patch)
-
-	out, err := json.MarshalIndent(merged, "", "  ")
-	if err != nil {
-		return nil, nil, err
-	}
-	return out, current, nil
 }

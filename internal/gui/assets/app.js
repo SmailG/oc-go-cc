@@ -91,12 +91,14 @@ const TRANSLATIONS = {
     'btn.export': 'Export',
     'btn.import': 'Import',
     'btn.openConfig': 'Open Config',
+    'btn.openConfigTitle': 'Open the config file the proxy loaded in the default app',
     'status.openConfigOk': 'Opened config: ',
     'status.openConfigFail': 'Could not open config: ',
     'setting.logs': 'Proxy Logs',
     'setting.logsDesc': 'Follow the local log file live',
     'btn.viewLogs': 'View Logs',
     'logs.title': 'Proxy Logs',
+    'logs.close': 'Close log panel',
     'logs.follow': 'Follow',
     'logs.clear': 'Clear',
     'logs.live': 'live',
@@ -107,6 +109,21 @@ const TRANSLATIONS = {
     'logs.unavailable': 'Could not read the log file.',
     'logs.window': 'showing the end of the file',
     'logs.rotated': 'log file rotated, following the new file',
+    'ms.legend': 'Model Studio (Token Plan)',
+    'ms.anthropicHint': 'When set, this provider prefers the native Anthropic path over Chat Completions.',
+    'field.baseUrl': 'Base URL',
+    'field.anthropicBaseUrl': 'Anthropic Base URL',
+    'field.apiKey': 'API Key',
+    'field.timeout': 'Timeout (ms)',
+    'field.streamTimeout': 'Stream Timeout (ms)',
+    'field.streamingTimeout': 'Streaming Timeout (ms)',
+    'field.togglePassword': 'Toggle password visibility',
+    'jev.legend': 'Jev Routing',
+    'jev.mode': 'Mode',
+    'jev.timeout': 'Timeout (ms)',
+    'jev.model': 'Model',
+    'jev.baseUrl': 'Base URL',
+    'jev.apiKeyEnv': 'API Key Env Var',
     'jev.enable': 'Classify requests with Jev',
     'jev.enableHint': 'TypeSafe System One replaces keyword matching for requests the exact checks leave undecided. Applies without a restart.',
     'jev.modeHint': "shadow logs Jev's choice beside the keyword scenario and changes nothing; active lets Jev decide and can add up to timeout_ms to a request.",
@@ -250,12 +267,14 @@ const TRANSLATIONS = {
     'btn.export': '导出',
     'btn.import': '导入',
     'btn.openConfig': '打开配置',
+    'btn.openConfigTitle': '用默认应用打开代理加载的配置文件',
     'status.openConfigOk': '已打开配置：',
     'status.openConfigFail': '无法打开配置：',
     'setting.logs': '代理日志',
     'setting.logsDesc': '实时跟随本地日志文件',
     'btn.viewLogs': '查看日志',
     'logs.title': '代理日志',
+    'logs.close': '关闭日志面板',
     'logs.follow': '跟随',
     'logs.clear': '清空',
     'logs.live': '实时',
@@ -266,6 +285,21 @@ const TRANSLATIONS = {
     'logs.unavailable': '无法读取日志文件。',
     'logs.window': '显示文件末尾',
     'logs.rotated': '日志文件已轮转，正在跟随新文件',
+    'ms.legend': 'Model Studio（Token Plan）',
+    'ms.anthropicHint': '设置后，该提供商优先使用原生 Anthropic 接口而非 Chat Completions。',
+    'field.baseUrl': 'Base URL',
+    'field.anthropicBaseUrl': 'Anthropic Base URL',
+    'field.apiKey': 'API Key',
+    'field.timeout': '超时（毫秒）',
+    'field.streamTimeout': '流超时（毫秒）',
+    'field.streamingTimeout': '流式超时（毫秒）',
+    'field.togglePassword': '显示/隐藏密码',
+    'jev.legend': 'Jev 路由',
+    'jev.mode': '模式',
+    'jev.timeout': '超时（毫秒）',
+    'jev.model': '模型',
+    'jev.baseUrl': 'Base URL',
+    'jev.apiKeyEnv': 'API Key 环境变量',
     'jev.enable': '使用 Jev 分类请求',
     'jev.enableHint': 'TypeSafe System One 取代关键词匹配，用于精确检查未能判定的请求。修改即时生效，无需重启。',
     'jev.modeHint': 'shadow 仅在关键词场景旁记录 Jev 的判定，不改变路由；active 由 Jev 决定，最多为该请求增加 timeout_ms 的等待。',
@@ -307,6 +341,13 @@ function applyTranslations() {
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
     const key = el.getAttribute('data-i18n-placeholder');
     el.placeholder = t(key);
+  });
+  // Update accessible names and tooltips that are translated per element.
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    el.title = t(el.getAttribute('data-i18n-title'));
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+    el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria')));
   });
   // Update the language toggle text
   const langBtn = document.getElementById('btn-lang-toggle');
@@ -1361,6 +1402,20 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /* ── Open Config File ─────────────────────────────────────────── */
+// The result belongs beside the button: #save-status sits under the whole form
+// and is off-screen from the Backup card on a normal viewport.
+function showOpenConfigStatus(msg, type) {
+  const status = document.getElementById('open-config-status');
+  if (!status) return;
+  status.textContent = msg;
+  status.className = 'save-status ' + type;
+  clearTimeout(status.hideTimer);
+  status.hideTimer = setTimeout(() => {
+    status.textContent = '';
+    status.className = 'save-status';
+  }, 4000);
+}
+
 async function openConfigFile() {
   const btn = document.getElementById('btn-open-config');
   btn.disabled = true;
@@ -1370,9 +1425,9 @@ async function openConfigFile() {
       throw new Error(await response.text());
     }
     const data = await response.json();
-    showSaveStatus(t('status.openConfigOk') + data.path, 'success');
+    showOpenConfigStatus(t('status.openConfigOk') + data.path, 'success');
   } catch (e) {
-    showSaveStatus(t('status.openConfigFail') + e.message, 'error');
+    showOpenConfigStatus(t('status.openConfigFail') + e.message, 'error');
   } finally {
     btn.disabled = false;
   }
@@ -1381,6 +1436,8 @@ async function openConfigFile() {
 /* ── Log Stream Panel ─────────────────────────────────────────── */
 const LogPanel = {
   es: null,
+  active: false, // modal is open; a finishing load() must not attach after close
+  loadToken: 0, // discards a load() that a newer open/load superseded
   follow: true,
   stick: true, // pinned to the bottom: new lines keep the view scrolled down
   pending: [], // lines received while paused, shown when following resumes
@@ -1397,7 +1454,15 @@ const LogPanel = {
       this.follow = e.target.checked;
       if (this.follow) {
         this.flushPending();
-        this.setState(this.es ? t('logs.live') : '', 'live');
+        if (this.es) {
+          this.setState(t('logs.live'), 'live');
+        } else {
+          // No stream is open (closed, failed, or never attached): reattach.
+          // from=end cannot replay the gap, so repaint from the tail first.
+          document.getElementById('log-view').replaceChildren();
+          this.pending = [];
+          this.load();
+        }
       } else {
         this.setState(t('logs.paused'), '');
       }
@@ -1409,20 +1474,25 @@ const LogPanel = {
   },
 
   async open() {
+    this.active = true;
     document.getElementById('log-modal').classList.add('visible');
-    if (document.getElementById('log-view').childElementCount === 0) {
+    if (!this.es) {
+      // Repaint from the current tail: lines written while the panel was closed
+      // are not in the view, and attach() starts at EOF.
+      document.getElementById('log-view').replaceChildren();
+      this.pending = [];
       await this.load();
-    } else if (this.follow && !this.es) {
-      this.attach();
     }
   },
 
   close() {
+    this.active = false;
     this.detach();
     document.getElementById('log-modal').classList.remove('visible');
   },
 
   async load() {
+    const token = ++this.loadToken;
     this.pending = [];
     try {
       const response = await fetch('/api/logs');
@@ -1430,6 +1500,9 @@ const LogPanel = {
         throw new Error(await response.text());
       }
       const data = await response.json();
+      if (token !== this.loadToken || !this.active) {
+        return;
+      }
       const pathEl = document.getElementById('log-meta-path');
       pathEl.textContent = data.path || '';
       pathEl.title = data.path || '';
@@ -1447,6 +1520,9 @@ const LogPanel = {
         this.attach();
       }
     } catch (e) {
+      if (token !== this.loadToken || !this.active) {
+        return;
+      }
       this.setState(t('logs.down'), 'down');
       this.addLines([t('logs.unavailable') + ' ' + e.message], 'log-sys');
     }
@@ -1454,8 +1530,9 @@ const LogPanel = {
 
   attach() {
     this.detach();
-    // from=end: load() already rendered the window, so replaying it would duplicate.
-    const es = new EventSource('/api/logs/stream?from=end');
+    // The stream starts at EOF: load() already rendered the window, so replaying
+    // it would duplicate the tail.
+    const es = new EventSource('/api/logs/stream');
     es.addEventListener('open', () => this.setState(t('logs.live'), 'live'));
     es.addEventListener('line', e => this.receive(JSON.parse(e.data)));
     es.addEventListener('rotate', () => {

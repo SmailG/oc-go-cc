@@ -12,43 +12,88 @@ import (
 	"github.com/routatic/proxy/internal/config"
 )
 
-func TestRestoreEnvRefs(t *testing.T) {
-	raw := map[string]any{
-		"api_key": "${GLOBAL_KEY}",
-		"model_studio": map[string]any{
-			"api_key":  "${TOKEN_PLAN_KEY}",
-			"api_keys": []any{"${KEY_ONE}", "${KEY_TWO}"},
-			"base_url": "https://example.test/v1",
-		},
-	}
-	merged := map[string]any{
-		"api_key": "resolved-global",
-		"model_studio": map[string]any{
-			"api_key":  "resolved-token-plan",
-			"api_keys": []any{"resolved-one", "resolved-two"},
-			"base_url": "https://example.test/v1",
-		},
-	}
-
-	// The client changed only the base URL.
-	restoreEnvRefs(raw, merged, map[string]any{"model_studio": map[string]any{"base_url": "https://new.test/v1"}})
-
-	if merged["api_key"] != "${GLOBAL_KEY}" {
-		t.Errorf("global key = %v, want the reference back", merged["api_key"])
-	}
-	ms := merged["model_studio"].(map[string]any)
-	if ms["api_key"] != "${TOKEN_PLAN_KEY}" {
-		t.Errorf("model_studio.api_key = %v, want the reference back", ms["api_key"])
-	}
-	if keys := ms["api_keys"].([]any); keys[0] != "${KEY_ONE}" || keys[1] != "${KEY_TWO}" {
-		t.Errorf("api_keys = %v, want the original references", keys)
+// The patch must leave every reference the client did not touch exactly as it
+// was stored — at any depth, including array elements that are objects, which is
+// how fallbacks and extra_body are shaped.
+func TestMergeConfigPatch_PreservesReferencesAnywhere(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	original := `{
+  "host": "127.0.0.1",
+  "port": 3456,
+  "api_key": "${GLOBAL_KEY}",
+  "model_studio": {"api_key": "${TOKEN_PLAN_KEY}"},
+  "fallbacks": {
+    "default": [
+      {"provider": "model-studio", "model_id": "qwen3.8-max", "api_key": "${NESTED_KEY}"}
+    ]
+  },
+  "unknown_future_field": {"keep": "${KEEP_KEY}"}
+}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	// A field the client did send must keep the client's value.
-	merged["model_studio"].(map[string]any)["api_key"] = "typed-by-user"
-	restoreEnvRefs(raw, merged, map[string]any{"model_studio": map[string]any{"api_key": "typed-by-user"}})
-	if got := merged["model_studio"].(map[string]any)["api_key"]; got != "typed-by-user" {
-		t.Errorf("model_studio.api_key = %v, a patched field must not be restored", got)
+	out, err := mergeConfigPatch(path, map[string]any{"hot_reload": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"${GLOBAL_KEY}", "${TOKEN_PLAN_KEY}", "${NESTED_KEY}", "${KEEP_KEY}"} {
+		if !strings.Contains(string(out), ref) {
+			t.Errorf("%s was not preserved:\n%s", ref, out)
+		}
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["hot_reload"] != true {
+		t.Errorf("hot_reload = %v, want the patched value", got["hot_reload"])
+	}
+	if _, ok := got["unknown_future_field"]; !ok {
+		t.Error("a key this build does not model must survive a save")
+	}
+}
+
+// A field the client did send replaces the stored value, including a reference.
+func TestMergeConfigPatch_PatchedReferenceIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"api_key":"${GLOBAL_KEY}"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := mergeConfigPatch(path, map[string]any{"api_key": "typed-by-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "${GLOBAL_KEY}") {
+		t.Errorf("a patched field must not be restored:\n%s", out)
+	}
+	if !strings.Contains(string(out), "typed-by-user") {
+		t.Errorf("the patch was not applied:\n%s", out)
+	}
+}
+
+// An env override changes the running config but must never be written to disk
+// when an unrelated field is saved.
+func TestMergeConfigPatch_DoesNotPersistEnvOverrides(t *testing.T) {
+	t.Setenv("ROUTATIC_PROXY_API_KEY", "env-value")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"api_key":"file-value"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := mergeConfigPatch(path, map[string]any{"hot_reload": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "env-value") {
+		t.Errorf("an env override reached the config file:\n%s", out)
+	}
+	if !strings.Contains(string(out), "file-value") {
+		t.Errorf("the literal file value was replaced:\n%s", out)
 	}
 }
 
@@ -57,6 +102,7 @@ func TestRestoreEnvRefs(t *testing.T) {
 func TestHandleProxyConfig_PreservesEnvReferences(t *testing.T) {
 	t.Setenv("ROUTATIC_PROXY_API_KEY", "resolved-global")
 	t.Setenv("BAILIAN_TOKEN_PLAN_API_KEY", "resolved-token-plan")
+	t.Setenv("NESTED_VENDOR_KEY", "resolved-nested")
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -68,6 +114,11 @@ func TestHandleProxyConfig_PreservesEnvReferences(t *testing.T) {
   "model_studio": {
     "base_url": "https://token-plan.example/v1",
     "api_key": "${BAILIAN_TOKEN_PLAN_API_KEY}"
+  },
+  "fallbacks": {
+    "default": [
+      {"provider": "opencode-go", "model_id": "kimi-k2.6", "extra_body": {"vendor_key": "${NESTED_VENDOR_KEY}"}}
+    ]
   }
 }`
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
@@ -88,7 +139,9 @@ func TestHandleProxyConfig_PreservesEnvReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(written), "resolved-global") || strings.Contains(string(written), "resolved-token-plan") {
+	if strings.Contains(string(written), "resolved-global") ||
+		strings.Contains(string(written), "resolved-token-plan") ||
+		strings.Contains(string(written), "resolved-nested") {
 		t.Fatalf("a resolved key reached the config file:\n%s", written)
 	}
 	if !strings.Contains(string(written), "${ROUTATIC_PROXY_API_KEY}") {
@@ -96,6 +149,10 @@ func TestHandleProxyConfig_PreservesEnvReferences(t *testing.T) {
 	}
 	if !strings.Contains(string(written), "${BAILIAN_TOKEN_PLAN_API_KEY}") {
 		t.Errorf("model_studio key reference was lost:\n%s", written)
+	}
+	// The array-of-objects depth is the one the old restore step missed.
+	if !strings.Contains(string(written), "${NESTED_VENDOR_KEY}") {
+		t.Errorf("a reference nested in fallbacks was resolved into the file:\n%s", written)
 	}
 	var reread map[string]any
 	if err := json.Unmarshal(written, &reread); err != nil {

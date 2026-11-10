@@ -56,7 +56,7 @@ func newJevStub(t *testing.T, serve func(w http.ResponseWriter, r *http.Request)
 
 // jevOKBody builds a 200 response body with a Score and a Noul answer.
 func jevOKBody(score, noul float64) string {
-	return fmt.Sprintf(`{"model":"jev-1.13.0","answers":{
+	return fmt.Sprintf(`{"model":"jev-1.14.0","answers":{
 		"action":{"type":"score","score":%v,"confidence":0.9,"probabilities":{"0":0.1,"1":0.2,"2":0.7}},
 		"architecture":{"type":"noul","noul":%v}},
 		"usage":{"input_tokens":10,"output_tokens":4}}`, score, noul)
@@ -71,7 +71,7 @@ func respondJSON(body string) func(http.ResponseWriter, *http.Request) {
 
 func jevTestConfig(baseURL string) config.JevRoutingConfig {
 	return config.JevRoutingConfig{
-		Enabled: true, Mode: config.JevModeShadow, Model: "jev-1.13.0",
+		Enabled: true, Mode: config.JevModeShadow, Model: "jev-1.14.0",
 		TimeoutMs: 1000, APIKeyEnv: jevTestKeyEnv, BaseURL: baseURL,
 	}
 }
@@ -151,7 +151,7 @@ func TestJevClassifier_RequestShape(t *testing.T) {
 	if len(req) != 3 {
 		t.Errorf("top-level keys = %d, want exactly model/state/questions: %s", len(req), seen.body)
 	}
-	if string(req["model"]) != `"jev-1.13.0"` {
+	if string(req["model"]) != `"jev-1.14.0"` {
 		t.Errorf("model = %s", req["model"])
 	}
 	if string(req["state"]) != `{"request":"fix the bug in parse()"}` {

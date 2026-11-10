@@ -217,8 +217,10 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("gui server listen: no available port in range %d-%d", startPort, startPort+9)
 	}
 
-	// Wrap with security headers middleware.
-	s.srv = &http.Server{Handler: securityHeadersMiddleware(mux)}
+	// Wrap with security headers middleware. The request guard runs inside it so
+	// every request — static assets and API alike — is checked against the
+	// dashboard's loopback host before it is routed.
+	s.srv = &http.Server{Handler: securityHeadersMiddleware(requestGuardMiddleware(int(s.guiPort.Load()), mux))}
 	go func() {
 		if srvErr := s.srv.Serve(ln); srvErr != nil && srvErr != http.ErrServerClosed {
 			s.logger.Error("gui server error", "err", srvErr)
@@ -401,45 +403,63 @@ func (s *Server) handleProxyConfig(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		// Decode only the fields the client sent (partial update).
-		var patch map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxConfigPatchBytes))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read config patch: %v", err), http.StatusBadRequest)
+			return
+		}
+		var patch map[string]any
+		if err := decodeJSONMap(body, &patch); err != nil {
 			http.Error(w, fmt.Sprintf("invalid config format: %v", err), http.StatusBadRequest)
 			return
 		}
-		patchBytes, err := json.Marshal(patch)
+
+		path := s.atomicCfg.Path()
+		// Merge onto the file as stored, so ${VAR} references the patch did not
+		// replace (at any depth) and unknown keys survive the save.
+		data, err := mergeConfigPatch(path, patch)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to re-encode patch: %v", err), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Merge onto the config on disk. The result keeps ${VAR} references the
-		// patch did not replace, so a save cannot bake resolved keys into the file.
-		data, currentCfg, err := mergeConfigPatch(s.atomicCfg.Path(), patchBytes)
+		// Validate the merged document with the real loader before it can replace
+		// config.json: every loader check (API keys, URLs, extra_body, model
+		// overrides, ...) must pass, not just the ones checked here. A rejected
+		// patch used to leave an unbootable file on disk when Reload failed.
+		tmp, err := writeTempConfig(path, data)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to apply config patch: %v", err), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = os.Remove(tmp) }()
+
+		merged, err := config.LoadFromPath(tmp)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("config rejected: %v", err), http.StatusBadRequest)
 			return
 		}
 
 		// Validate essential fields.
-		if currentCfg.Host == "" {
+		if merged.Host == "" {
 			http.Error(w, "host is required", http.StatusBadRequest)
 			return
 		}
-		if currentCfg.Port < 1 || currentCfg.Port > 65535 {
+		if merged.Port < 1 || merged.Port > 65535 {
 			http.Error(w, "port must be between 1 and 65535", http.StatusBadRequest)
 			return
 		}
 
-		// Validate before touching the file. A disabled jev_routing block is inert and
-		// unvalidated, so the block this patch just enabled may be one the loader would
-		// reject — Reload would fail only after the working config was already replaced.
-		if err := config.CheckJevRouting(currentCfg.JevRouting); err != nil {
+		// A disabled jev_routing block is inert and skipped by the loader, so the
+		// block this patch just enabled may be one the loader would reject.
+		if err := config.CheckJevRouting(merged.JevRouting); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := os.WriteFile(s.atomicCfg.Path(), data, 0600); err != nil {
-			http.Error(w, fmt.Sprintf("failed to write config file: %v", err), http.StatusInternalServerError)
+		// Atomic replace: the validated document becomes config.json in one rename.
+		if err := os.Rename(tmp, path); err != nil {
+			http.Error(w, fmt.Sprintf("failed to replace config file: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -466,6 +486,10 @@ type catalogLockResponse struct {
 }
 
 const maxTestRequestBody = 1 << 20
+
+// maxConfigPatchBytes bounds the partial config update body. The dashboard sends
+// a handful of changed fields, so anything larger is a mistake or an abuse.
+const maxConfigPatchBytes = 1 << 20
 
 // handleTestSend proxies a chat request to the proxy server and streams the
 // response back. This avoids CORS issues that would arise from the browser

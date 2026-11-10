@@ -45,7 +45,10 @@ func TestHandleProxyConfig_BadJevBlockDoesNotOverwriteTheFile(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for a jev_routing block the loader would reject", rec.Code)
 	}
-	got, _ := os.ReadFile(path)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("the config file was replaced before validation: %s", got)
 	}
@@ -117,5 +120,37 @@ func TestHandleProxyConfig_DisableJevClearsTheLiveConfig(t *testing.T) {
 	}
 	if s.atomicCfg.Get().JevRouting.Enabled {
 		t.Error("the running proxy did not pick up the disable without a restart")
+	}
+}
+
+// The jev_routing check is not the only loader rule that matters: any field the
+// form exposes can be invalid. Validation must run on the merged document before
+// it replaces config.json, or a failed reload leaves an unbootable file behind.
+func TestHandleProxyConfig_InvalidFieldDoesNotOverwriteTheFile(t *testing.T) {
+	t.Setenv("ROUTATIC_PROXY_API_KEY", "test-key")
+	t.Setenv("MISSING_MODEL_STUDIO_KEY", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	original := []byte(`{"host":"127.0.0.1","port":3456,"model_studio":{"api_key":"literal-key"}}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := jevTestServer(path, &config.Config{Host: "127.0.0.1", Port: 3456})
+
+	// An unresolved reference is rejected by validateSingleAPIKey after the
+	// loader interpolates, exactly as it would be on the next start.
+	rec := postProxyConfig(s, map[string]any{
+		"model_studio": map[string]any{"api_key": "${MISSING_MODEL_STUDIO_KEY}"},
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("the config file was replaced by a document the loader rejects: %s", got)
 	}
 }

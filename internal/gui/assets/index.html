@@ -174,7 +174,7 @@
             <span data-i18n="logs.follow">Follow</span>
           </label>
           <button class="btn btn-small" id="btn-log-clear" data-i18n="logs.clear">Clear</button>
-          <button class="modal-close" id="log-modal-close" aria-label="Close log panel">
+          <button class="modal-close" id="log-modal-close" aria-label="Close log panel" data-i18n-aria="logs.close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -424,6 +424,7 @@
           <div>
             <div class="text-sm font-medium mb-0.5" data-i18n="setting.backup">Backup Configuration</div>
             <div class="text-xs text-[#98989d]" data-i18n="setting.backupDesc">Export current config as JSON file</div>
+            <div id="open-config-status" class="save-status text-left"></div>
           </div>
           <div class="flex items-center gap-2">
             <button class="btn btn-small" id="btn-export-config" data-i18n="btn.export">Export</button>
@@ -431,7 +432,7 @@
               <input type="checkbox" id="export-anonymize" class="cursor-pointer">
               <span data-i18n="label.anonymize">Anonymize</span>
             </label>
-            <button class="btn btn-small" id="btn-open-config" title="Open the config file the proxy loaded in the default app" data-i18n="btn.openConfig">Open Config</button>
+            <button class="btn btn-small" id="btn-open-config" title="Open the config file the proxy loaded in the default app" data-i18n="btn.openConfig" data-i18n-title="btn.openConfigTitle">Open Config</button>
           </div>
         </div>
 
@@ -568,21 +569,21 @@
       </fieldset>
 
       <fieldset class="border border-[#48484a] rounded p-3 mb-3 bg-[#2c2c2e]">
-        <legend class="text-sm font-semibold px-1.5 text-[#f5f5f7]">Model Studio (Token Plan)</legend>
+        <legend class="text-sm font-semibold px-1.5 text-[#f5f5f7]" data-i18n="ms.legend">Model Studio (Token Plan)</legend>
         <div class="mb-2">
-          <label for="cfg-ms-base-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Base URL</label>
+          <label for="cfg-ms-base-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.baseUrl">Base URL</label>
           <input type="text" id="cfg-ms-base-url" placeholder="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
         </div>
         <div class="mb-2">
-          <label for="cfg-ms-anthropic-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Anthropic Base URL</label>
+          <label for="cfg-ms-anthropic-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.anthropicBaseUrl">Anthropic Base URL</label>
           <input type="text" id="cfg-ms-anthropic-url" placeholder="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
-          <div class="field-hint">When set, this provider prefers the native Anthropic path over Chat Completions.</div>
+          <div class="field-hint" data-i18n="ms.anthropicHint">When set, this provider prefers the native Anthropic path over Chat Completions.</div>
         </div>
         <div class="mb-2">
-          <label for="cfg-ms-api-key" class="block text-[11px] font-medium text-[#98989d] mb-0.5">API Key</label>
+          <label for="cfg-ms-api-key" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.apiKey">API Key</label>
           <div class="input-with-btn flex gap-1 w-full">
             <input type="password" id="cfg-ms-api-key" placeholder="${BAILIAN_TOKEN_PLAN_API_KEY}" class="flex-1 px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
-            <button type="button" class="btn-show-hide" onclick="togglePasswordVisibility('cfg-ms-api-key')" aria-label="Toggle password visibility">
+            <button type="button" class="btn-show-hide" onclick="togglePasswordVisibility('cfg-ms-api-key')" aria-label="Toggle password visibility" data-i18n-aria="field.togglePassword">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
                 <circle cx="12" cy="12" r="3"></circle>
@@ -593,15 +594,15 @@
         </div>
         <div class="flex gap-2.5">
           <div class="flex-1 mb-2">
-            <label for="cfg-ms-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Timeout (ms)</label>
+            <label for="cfg-ms-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.timeout">Timeout (ms)</label>
             <input type="number" id="cfg-ms-timeout" placeholder="300000" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
           </div>
           <div class="flex-1 mb-2">
-            <label for="cfg-ms-stream-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Stream Timeout (ms)</label>
+            <label for="cfg-ms-stream-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.streamTimeout">Stream Timeout (ms)</label>
             <input type="number" id="cfg-ms-stream-timeout" placeholder="60000" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
           </div>
           <div class="flex-1 mb-2">
-            <label for="cfg-ms-streaming-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Streaming Timeout (ms)</label>
+            <label for="cfg-ms-streaming-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="field.streamingTimeout">Streaming Timeout (ms)</label>
             <input type="number" id="cfg-ms-streaming-timeout" placeholder="600000" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
           </div>
         </div>
@@ -652,7 +653,7 @@
       </fieldset>
 
       <fieldset class="border border-[#48484a] rounded p-3 mb-3 bg-[#2c2c2e]">
-        <legend class="text-sm font-semibold px-1.5 text-[#f5f5f7]">Jev Routing</legend>
+        <legend class="text-sm font-semibold px-1.5 text-[#f5f5f7]" data-i18n="jev.legend">Jev Routing</legend>
         <div class="flex items-center justify-between mb-2">
           <div>
             <div class="text-xs font-medium" data-i18n="jev.enable">Classify requests with Jev</div>
@@ -665,28 +666,28 @@
         </div>
         <div class="flex gap-2.5">
           <div class="flex-1 mb-2">
-            <label for="cfg-jev-mode" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Mode</label>
+            <label for="cfg-jev-mode" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="jev.mode">Mode</label>
             <select id="cfg-jev-mode" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
               <option value="shadow">shadow</option>
               <option value="active">active</option>
             </select>
           </div>
           <div class="flex-1 mb-2">
-            <label for="cfg-jev-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Timeout (ms)</label>
+            <label for="cfg-jev-timeout" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="jev.timeout">Timeout (ms)</label>
             <input type="number" id="cfg-jev-timeout" placeholder="800" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
           </div>
         </div>
         <div class="field-hint mb-2" data-i18n="jev.modeHint">shadow logs Jev's choice beside the keyword scenario and changes nothing; active lets Jev decide and can add up to timeout_ms to a request.</div>
         <div class="mb-2">
-          <label for="cfg-jev-model" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Model</label>
+          <label for="cfg-jev-model" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="jev.model">Model</label>
           <input type="text" id="cfg-jev-model" placeholder="jev-1.14.0" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
         </div>
         <div class="mb-2">
-          <label for="cfg-jev-base-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5">Base URL</label>
+          <label for="cfg-jev-base-url" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="jev.baseUrl">Base URL</label>
           <input type="text" id="cfg-jev-base-url" placeholder="https://api.typesafe.ai" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
         </div>
         <div class="mb-0">
-          <label for="cfg-jev-api-key-env" class="block text-[11px] font-medium text-[#98989d] mb-0.5">API Key Env Var</label>
+          <label for="cfg-jev-api-key-env" class="block text-[11px] font-medium text-[#98989d] mb-0.5" data-i18n="jev.apiKeyEnv">API Key Env Var</label>
           <input type="text" id="cfg-jev-api-key-env" placeholder="TYPESAFE_AI_API_KEY" class="w-full px-2 py-1.5 text-xs border border-[#48484a] rounded bg-[#3a3a3c] text-[#f5f5f7] outline-none focus:border-[#6366f1]">
           <div class="field-hint" id="cfg-jev-key-status"></div>
         </div>

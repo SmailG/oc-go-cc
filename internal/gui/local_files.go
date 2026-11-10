@@ -2,12 +2,12 @@ package gui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -25,10 +25,14 @@ const (
 	// that redirect stdout somewhere other than the daemon default.
 	LogFileEnvVar = "ROUTATIC_PROXY_LOG_FILE"
 
-	logTailBytes    = 64 << 10
-	logTailMaxBytes = 256 << 10
-	logMaxLines     = 500
-	logMaxCarry     = 1 << 20
+	logTailBytes         = 64 << 10
+	logReadChunkMaxBytes = 256 << 10
+	logMaxLines          = 500
+	logMaxCarry          = 1 << 20
+	// A rotated log is renamed away and recreated; a poll that lands between the
+	// two sees no file. Only report it gone after about ten seconds of misses at
+	// the default interval.
+	logFileMissingTicks = 25
 )
 
 // Poll interval and follower cap are variables so tests can drive a fast tick.
@@ -43,14 +47,14 @@ var (
 // runOpener is swapped in tests so they never launch a real viewer.
 var runOpener = defaultOpener
 
-func defaultOpener(path string) error {
+func defaultOpener(ctx context.Context, path string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", path)
+		cmd = exec.CommandContext(ctx, "open", path)
 	case "windows":
 		// explorer.exe reports success through a non-zero exit status.
-		if err := exec.Command("explorer", path).Run(); err != nil {
+		if err := exec.CommandContext(ctx, "explorer", path).Run(); err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
 				return nil
@@ -59,7 +63,7 @@ func defaultOpener(path string) error {
 		}
 		return nil
 	default:
-		cmd = exec.Command("xdg-open", path)
+		cmd = exec.CommandContext(ctx, "xdg-open", path)
 	}
 	return cmd.Run()
 }
@@ -89,6 +93,11 @@ func tailFile(path string, limitBytes int64) (lines []string, truncated bool, er
 	if err != nil {
 		return nil, false, err
 	}
+	// The export path is operator-controlled, but streaming a device or FIFO
+	// would block or spin forever; only plain files are logs.
+	if !st.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s is not a regular file", path)
+	}
 	size := st.Size()
 	start := int64(0)
 	if size > limitBytes {
@@ -113,7 +122,7 @@ func splitLogLines(buf []byte, dropFirst bool) []string {
 	out := make([]string, 0, 64)
 	start := 0
 	if dropFirst {
-		if i := indexOf(buf, '\n'); i >= 0 {
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
 			start = i + 1
 		} else {
 			start = len(buf)
@@ -121,7 +130,7 @@ func splitLogLines(buf []byte, dropFirst bool) []string {
 	}
 	for start <= len(buf) {
 		end := len(buf)
-		if i := indexOf(buf[start:], '\n'); i >= 0 {
+		if i := bytes.IndexByte(buf[start:], '\n'); i >= 0 {
 			end = start + i
 		}
 		line := trimCR(buf[start:end])
@@ -136,20 +145,8 @@ func splitLogLines(buf []byte, dropFirst bool) []string {
 	return out
 }
 
-func indexOf(b []byte, c byte) int {
-	for i := range b {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
 func trimCR(b []byte) string {
-	if len(b) > 0 && b[len(b)-1] == '\r' {
-		b = b[:len(b)-1]
-	}
-	return string(b)
+	return string(bytes.TrimSuffix(b, []byte("\r")))
 }
 
 // handleConfigPath returns the paths the dashboard shows for the local files.
@@ -176,12 +173,6 @@ func (s *Server) handleConfigOpen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// The dashboard binds loopback, but any web page could still POST here;
-	// the action launches a local application, so require a same-origin request.
-	if !sameOrigin(r) {
-		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
-		return
-	}
 	if s.atomicCfg == nil {
 		http.Error(w, "config not available", http.StatusServiceUnavailable)
 		return
@@ -201,23 +192,15 @@ func (s *Server) handleConfigOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := runOpener(path); err != nil {
+	// The launcher is a third-party binary: `xdg-open` can wait for the launched
+	// application to exit, so the request must not outlive a timeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if err := runOpener(ctx, path); err != nil {
 		http.Error(w, fmt.Sprintf("failed to open %s: %v", path, err), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]string{"path": path})
-}
-
-func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	return u.Host == r.Host
 }
 
 // handleLogs streams the tail of the local log file as JSON for the initial paint.
@@ -300,6 +283,23 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = f.Close() }()
 
+	// Capture EOF before any header is flushed. Once the client sees the response
+	// it may append, and a line written before the offset was read would fall
+	// behind it and never be delivered.
+	st, err := f.Stat()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("reading log file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !st.Mode().IsRegular() {
+		http.Error(w, fmt.Sprintf("%s is not a regular file", path), http.StatusUnsupportedMediaType)
+		return
+	}
+	// Start at EOF: the panel paints the window from GET /api/logs first, so a
+	// tail here would render the same lines twice. It also makes an EventSource
+	// reconnect idempotent.
+	offset := st.Size()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -308,34 +308,11 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	// until the first event, so a quiet log leaves the panel stuck on "connecting".
 	flusher.Flush()
 
-	st, err := f.Stat()
-	if err != nil {
-		sseEvent(w, flusher, "error", err.Error())
-		return
-	}
-
-	// from=end starts at EOF: the panel paints the window from GET /api/logs first,
-	// so a tail here would render the same lines twice. It also makes an
-	// EventSource reconnect idempotent.
-	offset := st.Size()
-	if r.URL.Query().Get("from") != "end" {
-		offset -= logTailBytes
-		if offset < 0 {
-			offset = 0
-		}
-		buf := make([]byte, st.Size()-offset)
-		if _, err := f.ReadAt(buf, offset); err != nil && err != io.EOF {
-			sseEvent(w, flusher, "error", err.Error())
-			return
-		}
-		sseEvent(w, flusher, "tail", splitLogLines(buf, offset > 0))
-	}
-	offset = st.Size()
-
 	ticker := time.NewTicker(logPollInterval)
 	defer ticker.Stop()
 
 	var carry []byte
+	misses := 0
 	ctx := r.Context()
 	for {
 		select {
@@ -344,14 +321,40 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 			st, err := f.Stat()
 			if err != nil {
+				continue
+			}
+			// f.Stat() is an fstat on the open descriptor: it never reports a
+			// missing file and cannot see rename-based rotation, because the
+			// descriptor keeps pointing at the old inode. Compare it with the
+			// path and reopen when a new file has taken the name.
+			ps, err := os.Stat(path)
+			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					sseEvent(w, flusher, "error", "log file disappeared")
+					misses++
+					if misses >= logFileMissingTicks {
+						sseEvent(w, flusher, "error", "log file disappeared")
+						return
+					}
+				}
+				continue
+			}
+			misses = 0
+			if !os.SameFile(st, ps) {
+				nf, err := os.Open(path)
+				if err != nil {
+					continue
+				}
+				_ = f.Close()
+				f = nf
+				offset = 0
+				carry = carry[:0]
+				if !sseEvent(w, flusher, "rotate", path) {
 					return
 				}
 				continue
 			}
 			if st.Size() < offset {
-				// Truncated or replaced by a rotated file.
+				// Truncated in place (copytruncate).
 				offset = 0
 				carry = carry[:0]
 				if !sseEvent(w, flusher, "rotate", path) {
@@ -363,8 +366,8 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			want := st.Size() - offset
-			if want > logTailMaxBytes {
-				want = logTailMaxBytes
+			if want > logReadChunkMaxBytes {
+				want = logReadChunkMaxBytes
 			}
 			chunk := make([]byte, want)
 			n, err := f.ReadAt(chunk, offset)
@@ -379,7 +382,7 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 
 			carry = append(carry, chunk[:n]...)
 			for {
-				i := indexOf(carry, '\n')
+				i := bytes.IndexByte(carry, '\n')
 				if i < 0 {
 					break
 				}
