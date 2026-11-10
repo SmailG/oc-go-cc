@@ -523,6 +523,10 @@ const maxTestRequestBody = 1 << 20
 // a handful of changed fields, so anything larger is a mistake or an abuse.
 const maxConfigPatchBytes = 1 << 20
 
+// maxConfigImportBytes bounds a config import. A full exported config is much
+// larger than a partial patch, so it gets its own, more generous cap.
+const maxConfigImportBytes = 4 << 20
+
 // handleTestSend proxies a chat request to the proxy server and streams the
 // response back. This avoids CORS issues that would arise from the browser
 // calling the proxy port directly.

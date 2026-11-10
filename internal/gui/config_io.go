@@ -2,7 +2,9 @@ package gui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -112,7 +114,21 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		Apply  bool            `json:"apply"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Bound the body like the patch and test-send endpoints do. A full config
+	// gets a larger cap than a partial patch, but it is still bounded. Read it
+	// first so the size error is distinguishable from malformed JSON.
+	r.Body = http.MaxBytesReader(w, r.Body, maxConfigImportBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "config import too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, fmt.Sprintf("failed to read request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 		return
 	}
