@@ -230,3 +230,37 @@ func TestHandleConfigEnv_RejectsNonGet(t *testing.T) {
 		t.Errorf("status = %d, want 405", rec.Code)
 	}
 }
+
+// Internal failures are logged, not echoed: the client gets a short message
+// without the absolute path or parser detail.
+func TestHandleConfigEnv_HidesInternalDetail(t *testing.T) {
+	t.Run("unreadable path", func(t *testing.T) {
+		dir := t.TempDir()
+		s := &Server{atomicCfg: config.NewAtomicConfig(&config.Config{}, dir)}
+		rec := httptest.NewRecorder()
+		s.handleConfigEnv(rec, httptest.NewRequest(http.MethodGet, "/api/config/env", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), dir) {
+			t.Errorf("the response leaked the config path: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{atomicCfg: config.NewAtomicConfig(&config.Config{}, path)}
+		rec := httptest.NewRecorder()
+		s.handleConfigEnv(rec, httptest.NewRequest(http.MethodGet, "/api/config/env", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "invalid character") {
+			t.Errorf("the response leaked parser detail: %s", rec.Body.String())
+		}
+	})
+}

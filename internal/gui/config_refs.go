@@ -96,12 +96,14 @@ func (s *Server) handleConfigEnv(w http.ResponseWriter, r *http.Request) {
 
 	data, err := os.ReadFile(s.atomicCfg.Path())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("reading config: %v", err), http.StatusInternalServerError)
+		s.logInternal("reading config for env refs", err)
+		http.Error(w, "could not read the config file", http.StatusInternalServerError)
 		return
 	}
 	var raw map[string]any
 	if err := decodeJSONMap(data, &raw); err != nil {
-		http.Error(w, fmt.Sprintf("invalid config file: %v", err), http.StatusInternalServerError)
+		s.logInternal("parsing config for env refs", err)
+		http.Error(w, "config file is not valid JSON", http.StatusInternalServerError)
 		return
 	}
 

@@ -702,6 +702,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// logInternal records a handler's internal failure without echoing filesystem
+// paths or parser detail to the client.
+func (s *Server) logInternal(msg string, err error) {
+	if s.logger != nil {
+		s.logger.Error(msg, "err", err)
+	}
+}
+
 // ensurePortAvailable checks if an existing routatic-proxy GUI is running on
 // the configured port and kills it if found. It does not test-bind — the caller
 // handles binding and will retry with higher ports on failure.
